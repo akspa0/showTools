@@ -6,7 +6,6 @@ This script transcribes audio files using Google Cloud Speech-to-Text API. It se
 
 - Transcribes audio files (.mp3 or .wav format) to text using Google Cloud Speech-to-Text API.
 - Segments audio files based on silence intervals to process manageable chunks.
-- Normalizes audio input before processing to ensure consistent results.
 - Supports multi-speaker diarization for accurate transcriptions of conversations.
 - Generates FLAC and MP3 files for each segmented audio along with their transcriptions.
 - Handles duplicate segments and prevents duplicate transcriptions.
@@ -44,7 +43,6 @@ python transcribeBites0F.py --input /path/to/input/folder --output /path/to/outp
 - `--speakers`: Number of speakers in the audio (default: 1).
 - `--credentials`: Path to Google Cloud service account credentials JSON file.
 - `--max-duration`: Maximum duration of each segment in milliseconds (default: 10000).
-- `--normalize-input`: Normalize input audio before processing (default: False).
 - `--silence-thresh`: Silence threshold in dB (default: -40).
 - `--compression-ratio`: Compression ratio for dynamic compression (default: 10.0).
 
