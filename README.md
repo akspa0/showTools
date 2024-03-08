@@ -10,3 +10,5 @@ speakerTranscribe29I.py - (https://github.com/akspa0/showTools/blob/main/README_
 
 
 transcribeBites0F.py - In-development version of speakerTranscribe29I+++ (https://github.com/akspa0/showTools/blob/main/README_transcribeBites.md)
+
+convertToMono.py - Converts a file or folders with sub-directories to mono. (README_converToMono.py|https://github.com/akspa0/showTools/blob/main/README_convertToMono.md)
