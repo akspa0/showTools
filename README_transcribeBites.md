@@ -45,6 +45,7 @@ python transcribeBites0F.py --input /path/to/input/folder --output /path/to/outp
 - `--max-duration`: Maximum duration of each segment in milliseconds (default: 10000).
 - `--silence-thresh`: Silence threshold in dB (default: -40).
 - `--compression-ratio`: Compression ratio for dynamic compression (default: 10.0).
+- `--dry-run`: Simulate the process without actually transcribing the audio.
 
 ## Acknowledgments
 
