@@ -1,7 +1,7 @@
 # showTools
 post-processing scripts for phone call audio
 
-preMix21.py - (akspa0/showTools/blob/main/README_preMix21.md)
+preMix21.py - A tool that takes audio captured from Asterisk/FreePBX recordings, and pre-mixes them with stereo separation between outgoing and incoming audio (as per the instructions on https://immoralhole.com/show/asterisk-ramblings/ - https://github.com/akspa0/showTools/blob/main/README_preMix21.md
 
 transcribeBites0F.py - successor to speakerTranscripe29I. Development version that is more stable than 29I.
 (https://github.com/akspa0/showTools/blob/main/README_transcribeBites.md)
