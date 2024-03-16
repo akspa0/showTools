@@ -1,6 +1,5 @@
 import os
 import argparse
-from datetime import datetime
 from pydub import AudioSegment
 
 def adjust_channel_volumes_and_pan(audio):
@@ -17,8 +16,15 @@ def adjust_channel_volumes_and_pan(audio):
     return stereo_audio, adjusted_left, adjusted_right
 
 def process_audio_files(input_folder, output_folder, append_audio_file=None, debug=False):
-    # Create the output directory if it doesn't exist
-    os.makedirs(output_folder, exist_ok=True)
+    # Create output folders if they don't exist
+    left_folder = os.path.join(output_folder, "_left")
+    right_folder = os.path.join(output_folder, "_right")
+    stereo_folder = os.path.join(output_folder, "_stereo")
+    appended_stereo_folder = os.path.join(output_folder, "_appended_stereo")
+    os.makedirs(left_folder, exist_ok=True)
+    os.makedirs(right_folder, exist_ok=True)
+    os.makedirs(stereo_folder, exist_ok=True)
+    os.makedirs(appended_stereo_folder, exist_ok=True)
 
     # Iterate over all files in the input directory
     for root, dirs, files in os.walk(input_folder):
@@ -32,33 +38,42 @@ def process_audio_files(input_folder, output_folder, append_audio_file=None, deb
                 # Adjust volumes and pan for left and right channels
                 stereo_audio, left_channel, right_channel = adjust_channel_volumes_and_pan(audio)
 
+                # Get original timestamp of the input file
+                timestamp = os.path.getmtime(input_file)
+
                 # Export left and right channel files with original timestamp
                 base_name = os.path.splitext(os.path.basename(input_file))[0]
-                timestamp = datetime.fromtimestamp(os.path.getmtime(input_file)).strftime('%Y-%m-%d_%H-%M-%S')
-                left_output_path = os.path.join(output_folder, f"{base_name}_left_{timestamp}.wav")
-                right_output_path = os.path.join(output_folder, f"{base_name}_right_{timestamp}.wav")
+                left_output_path = os.path.join(left_folder, f"{base_name}_left.wav")
+                right_output_path = os.path.join(right_folder, f"{base_name}_right.wav")
                 left_channel.export(left_output_path, format='wav')
                 right_channel.export(right_output_path, format='wav')
 
-                # Rebuild stereo audio file
-                stereo_output_path = os.path.join(output_folder, f"{base_name}_stereo_{timestamp}.wav")
+                # Rebuild stereo audio file with original timestamp
+                stereo_output_path = os.path.join(stereo_folder, f"{base_name}_stereo.wav")
                 stereo_audio.export(stereo_output_path, format='wav')
 
                 if append_audio_file:
                     # Append audio if provided
                     append_audio_segment = AudioSegment.from_file(append_audio_file)
                     stereo_audio_with_append = stereo_audio + append_audio_segment
-                    stereo_output_path_with_append = os.path.join(output_folder, f"{base_name}_stereo_appended_{timestamp}.wav")
+                    stereo_output_path_with_append = os.path.join(appended_stereo_folder, f"{base_name}_stereo_appended.wav")
                     stereo_audio_with_append.export(stereo_output_path_with_append, format='wav')
 
                 if debug:
-                    print(f"Processed and saved: {input_file} -> {stereo_output_path}")
+                    print(f"Processed: {input_file}")
+
+                # Preserve original timestamp in output files
+                os.utime(left_output_path, (timestamp, timestamp))
+                os.utime(right_output_path, (timestamp, timestamp))
+                os.utime(stereo_output_path, (timestamp, timestamp))
+                if append_audio_file:
+                    os.utime(stereo_output_path_with_append, (timestamp, timestamp))
 
             except Exception as e:
                 print(f"Error processing {input_file}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Process stereo audio files in a directory with 40% stereo separation, adjust peaks, and export separate channels and stereo output with original timestamps.')
+    parser = argparse.ArgumentParser(description='Process stereo audio files in a directory with 40% stereo separation, adjust peaks, and export separate channels and stereo output.')
     parser.add_argument('input', help='Input folder containing stereo audio files')
     parser.add_argument('output', help='Output folder where processed files will be saved')
     parser.add_argument('--append-audio', help='Audio file to append to the end of the resulting stereo output file')
