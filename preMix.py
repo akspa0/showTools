@@ -1,92 +1,143 @@
 import os
+import shutil
 import argparse
 from pydub import AudioSegment
+from tqdm import tqdm
+
+def calculate_peak_levels(audio):
+    if audio.channels == 2:
+        left_channel, right_channel = audio.split_to_mono()
+        peaks = left_channel.max, right_channel.max
+    else:
+        peaks = audio.max, audio.max
+    return peaks
 
 def adjust_channel_volumes_and_pan(audio):
-    # Split stereo audio into left and right channels
     left_channel, right_channel = audio.split_to_mono()
+    left_peak, right_peak = calculate_peak_levels(audio)
+    target_peak = max(left_peak, right_peak)
 
-    # Apply 20% panning to each channel for 40% stereo separation
-    adjusted_left = left_channel.pan(-0.2)
-    adjusted_right = right_channel.pan(0.2)
+    # Calculate adjustment to match the lower peak to the higher one, considering headroom to avoid clipping
+    adjustment = min(target_peak - left_peak, target_peak - right_peak, 0)
 
-    # Combine left and right channels into stereo audio
-    stereo_audio = adjusted_left.overlay(adjusted_right)
+    adjusted_left = left_channel.apply_gain(adjustment)
+    adjusted_right = right_channel.apply_gain(adjustment)
 
+    # Pan channels for combined stereo output, not needed for individual channel exports
+    panned_left = adjusted_left.pan(-0.2)
+    panned_right = adjusted_right.pan(0.2)
+
+    # Merge channels for stereo output
+    stereo_audio = panned_left.overlay(panned_right)
     return stereo_audio, adjusted_left, adjusted_right
 
-def process_audio_files(input_folder, output_folder, append_audio_file=None, debug=False):
-    # Create output folders if they don't exist
-    left_folder = os.path.join(output_folder, "_left")
-    right_folder = os.path.join(output_folder, "_right")
-    stereo_folder = os.path.join(output_folder, "_stereo")
-    appended_stereo_folder = os.path.join(output_folder, "_appended_stereo")
-    os.makedirs(left_folder, exist_ok=True)
-    os.makedirs(right_folder, exist_ok=True)
-    os.makedirs(stereo_folder, exist_ok=True)
-    os.makedirs(appended_stereo_folder, exist_ok=True)
+def export_channels(input_file, output_folder, stereo_audio, left_channel, right_channel, sample_rate=16000, timestamp=None, append_file=None):
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+    left_path = os.path.join(output_folder, "left", f"{base_name}_left.wav")
+    right_path = os.path.join(output_folder, "right", f"{base_name}_right.wav")
+    stereo_path = os.path.join(output_folder, "stereo", f"{base_name}_stereo.wav")
 
-    # Iterate over all files in the input directory
-    for root, dirs, files in os.walk(input_folder):
-        for file in files:
-            input_file = os.path.join(root, file)
+    # Export left and right channels with specified sample rate
+    left_channel.export(left_path, format="wav", parameters=["-ar", str(sample_rate)])
+    right_channel.export(right_path, format="wav", parameters=["-ar", str(sample_rate)])
+    
+    # Export stereo audio with specified sample rate
+    stereo_audio.export(stereo_path, format="wav", parameters=["-ar", str(sample_rate)])
 
-            try:
-                # Load stereo audio
-                audio = AudioSegment.from_file(input_file)
+    # Set output file timestamps to match the input file timestamp
+    if timestamp is not None:
+        os.utime(left_path, (timestamp, timestamp))
+        os.utime(right_path, (timestamp, timestamp))
+        os.utime(stereo_path, (timestamp, timestamp))
 
-                # Adjust volumes and pan for left and right channels
-                stereo_audio, left_channel, right_channel = adjust_channel_volumes_and_pan(audio)
+    # Append the specified sound file to each output file if provided
+    if append_file is not None:
+        append_audio = AudioSegment.from_file(append_file)
+        left_audio = AudioSegment.from_file(left_path)
+        right_audio = AudioSegment.from_file(right_path)
+        stereo_audio = AudioSegment.from_file(stereo_path)
 
-                # Get original timestamp of the input file
-                timestamp = os.path.getmtime(input_file)
+        left_audio += append_audio
+        right_audio += append_audio
+        stereo_audio += append_audio
 
-                # Export left and right channel files with original timestamp
-                base_name = os.path.splitext(os.path.basename(input_file))[0]
-                left_output_path = os.path.join(left_folder, f"{base_name}_left.wav")
-                right_output_path = os.path.join(right_folder, f"{base_name}_right.wav")
-                left_channel.export(left_output_path, format='wav')
-                right_channel.export(right_output_path, format='wav')
+        left_audio.export(left_path, format="wav", parameters=["-ar", str(sample_rate)])
+        right_audio.export(right_path, format="wav", parameters=["-ar", str(sample_rate)])
+        stereo_audio.export(stereo_path, format="wav", parameters=["-ar", str(sample_rate)])
 
-                # Rebuild stereo audio file with original timestamp
-                stereo_output_path = os.path.join(stereo_folder, f"{base_name}_stereo.wav")
-                stereo_audio.export(stereo_output_path, format='wav')
+    # After appending and exporting, set the output file timestamps again to preserve the original timestamps
+    if timestamp is not None:
+        os.utime(left_path, (timestamp, timestamp))
+        os.utime(right_path, (timestamp, timestamp))
+        os.utime(stereo_path, (timestamp, timestamp))
 
-                if append_audio_file:
-                    # Append audio if provided
-                    append_audio_segment = AudioSegment.from_file(append_audio_file)
-                    stereo_audio_with_append = stereo_audio + append_audio_segment
-                    stereo_output_path_with_append = os.path.join(appended_stereo_folder, f"{base_name}_stereo_appended.wav")
-                    stereo_audio_with_append.export(stereo_output_path_with_append, format='wav')
+def process_audio_file(input_file, output_folder, append_file=None, debug=False):
+    try:
+        # Get the duration of the input audio file
+        audio = AudioSegment.from_file(input_file)
+        duration_seconds = len(audio) / 1000  # Convert milliseconds to seconds
 
-                if debug:
-                    print(f"Processed: {input_file}")
+        # Skip processing if the duration is 8 seconds or less
+        if duration_seconds <= 8:
+            if debug:
+                print(f"Skipped processing {input_file} as it is 8 seconds or less in duration.")
+            return
 
-                # Preserve original timestamp in output files
-                os.utime(left_output_path, (timestamp, timestamp))
-                os.utime(right_output_path, (timestamp, timestamp))
-                os.utime(stereo_output_path, (timestamp, timestamp))
-                if append_audio_file:
-                    os.utime(stereo_output_path_with_append, (timestamp, timestamp))
+        stereo_audio, left_channel, right_channel = adjust_channel_volumes_and_pan(audio)
 
-            except Exception as e:
-                print(f"Error processing {input_file}: {e}")
+        # Extract timestamp from input file
+        timestamp = os.path.getmtime(input_file)
+
+        # Create sub-folders if they don't exist
+        os.makedirs(os.path.join(output_folder, "left"), exist_ok=True)
+        os.makedirs(os.path.join(output_folder, "right"), exist_ok=True)
+        os.makedirs(os.path.join(output_folder, "stereo"), exist_ok=True)
+
+        # Export the processed audio channels and append the specified sound file
+        export_channels(input_file, output_folder, stereo_audio, left_channel, right_channel, timestamp=timestamp, append_file=append_file)
+
+        if debug:
+            print(f"Processed and saved: {input_file} into separate channels and combined stereo.")
+
+        # Move the output files to their respective sub-folders and set timestamps again
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        left_file = os.path.join(output_folder, f"left/{base_name}_left.wav")
+        right_file = os.path.join(output_folder, f"right/{base_name}_right.wav")
+        stereo_file = os.path.join(output_folder, f"stereo/{base_name}_stereo.wav")
+
+        shutil.move(f"{base_name}_left.wav", left_file)
+        shutil.move(f"{base_name}_right.wav", right_file)
+        shutil.move(f"{base_name}_stereo.wav", stereo_file)
+
+        os.utime(left_file, (timestamp, timestamp))
+        os.utime(right_file, (timestamp, timestamp))
+        os.utime(stereo_file, (timestamp, timestamp))
+
+    except Exception as e:
+        if debug:
+            print(f"Error processing {input_file}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Process stereo audio files in a directory with 40% stereo separation, adjust peaks, and export separate channels and stereo output.')
-    parser.add_argument('input', help='Input folder containing stereo audio files')
-    parser.add_argument('output', help='Output folder where processed files will be saved')
-    parser.add_argument('--append-audio', help='Audio file to append to the end of the resulting stereo output file')
+    parser = argparse.ArgumentParser(description='Comprehensive audio processing script with individual channel exports, timestamp preservation, and optional appending of a sound file.')
+    parser.add_argument('input', help='Input file or directory containing audio files')
+    parser.add_argument('output', help='Output directory where processed files will be saved')
+    parser.add_argument('--append', help='Optional file to append to the end of each output file')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode to show debug messages')
 
     args = parser.parse_args()
 
-    input_folder = args.input
+    input_path = args.input
     output_folder = args.output
-    append_audio_file = args.append_audio
+    append_file = args.append
     debug = args.debug
 
-    process_audio_files(input_folder, output_folder, append_audio_file, debug)
+    if os.path.isfile(input_path):
+        process_audio_file(input_path, output_folder, append_file, debug)
+    elif os.path.isdir(input_path):
+        for root, dirs, files in os.walk(input_path):
+            for file in tqdm(files, desc="Processing files"):
+                input_file = os.path.join(root, file)
+                process_audio_file(input_file, output_folder, append_file, debug)
 
 if __name__ == "__main__":
     main()
