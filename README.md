@@ -1,16 +1,19 @@
 # showTools
 post-processing scripts for phone call audio
 
-preMix.py - In-development version of the preMix script. In a constant state of breaking changes that are minimally tested - https://github.com/akspa0/showTools/blob/main/README_preMix.md
+preMix.py - A premixing script for stereo recordings. Uses below mix-stereo script for Asterisk/FreePBX for input data. In a constant state of breaking changes that are minimally tested - https://github.com/akspa0/showTools/blob/main/README_preMix.md
 
-preMix21.py - A tool that takes audio captured from Asterisk/FreePBX recordings, and pre-mixes them with stereo separation between outgoing and incoming audio 
-(https://github.com/akspa0/showTools/blob/main/README_preMix21.md)
+transcribeBites12.py - highly experimental version of the older transcribeBites0F.py script below.
 
 transcribeBites0F.py - successor to speakerTranscripe29I. Development version that is more stable than 29I.
 (https://github.com/akspa0/showTools/blob/main/README_transcribeBites.md)
 
 convertToMono.py - Converts a file or folders with sub-directories to mono. 
 (https://github.com/akspa0/showTools/blob/main/README_convertToMono.md)
+
+``DEPRECATED``
+preMix21.py - A tool that takes audio captured from Asterisk/FreePBX recordings, and pre-mixes them with stereo separation between outgoing and incoming audio 
+(https://github.com/akspa0/showTools/blob/main/README_preMix21.md)
 
 ``DEPRECATED``
 speakerTranscribe29I.py - A proof of concept that segments audio and transcribes the segments, however, it has several issues with detecting speech properly and has been deprecated in favor of 'TranscribeBites'.
