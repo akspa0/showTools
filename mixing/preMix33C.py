@@ -71,7 +71,7 @@ def export_channels(input_file, output_folder, stereo_audio, left_channel, right
         os.utime(right_path, (timestamp, timestamp))
         os.utime(stereo_path, (timestamp, timestamp))
 
-def process_audio_file(input_file, output_folder, append_file=None, debug=False):
+def process_audio_file(input_file, output_folder, append_file=None, process_in_out=False, debug=False):
     try:
         # Get the duration of the input audio file
         audio = AudioSegment.from_file(input_file)
@@ -83,7 +83,20 @@ def process_audio_file(input_file, output_folder, append_file=None, debug=False)
                 print(f"Skipped processing {input_file} as it is 8 seconds or less in duration.")
             return
 
-        stereo_audio, left_channel, right_channel = adjust_channel_volumes_and_pan(audio)
+        # Check if input file contains "_in" or "_out" in its filename
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        if process_in_out and ("_in" in base_name or "_out" in base_name):
+            if "_out" in base_name:
+                left_input = input_file
+                right_input = input_file.replace("_out", "_in")
+            else:  # "_in" in base_name
+                left_input = input_file.replace("_in", "_out")
+                right_input = input_file
+            # Process the input files as left and right channels
+            left_audio = AudioSegment.from_file(left_input)
+            right_audio = AudioSegment.from_file(right_input)
+        else:
+            stereo_audio, left_audio, right_audio = adjust_channel_volumes_and_pan(audio)
 
         # Extract timestamp from input file
         timestamp = os.path.getmtime(input_file)
@@ -94,7 +107,7 @@ def process_audio_file(input_file, output_folder, append_file=None, debug=False)
         os.makedirs(os.path.join(output_folder, "stereo"), exist_ok=True)
 
         # Export the processed audio channels and append the specified sound file
-        export_channels(input_file, output_folder, stereo_audio, left_channel, right_channel, timestamp=timestamp, append_file=append_file)
+        export_channels(input_file, output_folder, stereo_audio, left_audio, right_audio, timestamp=timestamp, append_file=append_file)
 
         if debug:
             print(f"Processed and saved: {input_file} into separate channels and combined stereo.")
@@ -118,10 +131,11 @@ def process_audio_file(input_file, output_folder, append_file=None, debug=False)
             print(f"Error processing {input_file}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Comprehensive audio processing script with individual channel exports, timestamp preservation, and optional appending of a sound file.')
+    parser = argparse.ArgumentParser(description='Comprehensive audio processing script with individual channel exports, timestamp preservation, optional appending of a sound file, and processing input files with "_in" or "_out" in their filenames.')
     parser.add_argument('input', help='Input file or directory containing audio files')
     parser.add_argument('output', help='Output directory where processed files will be saved')
     parser.add_argument('--append', help='Optional file to append to the end of each output file')
+    parser.add_argument('--process-in-out', action='store_true', help='Process input files with "_in" or "_out" in their filenames as left and right channels')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode to show debug messages')
 
     args = parser.parse_args()
@@ -129,15 +143,16 @@ def main():
     input_path = args.input
     output_folder = args.output
     append_file = args.append
+    process_in_out = args.process_in_out
     debug = args.debug
 
     if os.path.isfile(input_path):
-        process_audio_file(input_path, output_folder, append_file, debug)
+        process_audio_file(input_path, output_folder, append_file, process_in_out, debug)
     elif os.path.isdir(input_path):
         for root, dirs, files in os.walk(input_path):
             for file in tqdm(files, desc="Processing files"):
                 input_file = os.path.join(root, file)
-                process_audio_file(input_file, output_folder, append_file, debug)
+                process_audio_file(input_file, output_folder, append_file, process_in_out, debug)
 
 if __name__ == "__main__":
     main()
