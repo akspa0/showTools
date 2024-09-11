@@ -55,7 +55,7 @@ def sample_frames(input_dir, output_dir, num_frames, keywords, max_files):
             if cumulative_frames + num_frames_in_clip > frame_index:
                 frame_time = (frame_index - cumulative_frames) / clip.fps
                 frame = clip.get_frame(frame_time)
-                frame_filename = os.path.join(output_dir, f"{frame_index:04d}.png")
+                frame_filename = os.path.join(output_dir, f"{frame_index:08d}.png")  # Ensure unique filenames
                 frame_image = Image.fromarray(frame)
                 frame_image.save(frame_filename)
                 print(f"Saved frame {frame_index} from {clip.filename} at time {frame_time:.2f}s")
