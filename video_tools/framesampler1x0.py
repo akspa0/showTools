@@ -3,6 +3,7 @@ import random
 import argparse
 from moviepy.editor import VideoFileClip
 from tqdm import tqdm
+from PIL import Image  # Add this import
 from datetime import datetime
 
 def sample_frames(input_dir, output_dir, num_frames):
