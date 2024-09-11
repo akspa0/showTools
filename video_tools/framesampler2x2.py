@@ -7,7 +7,7 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
-def sample_frames(input_dir, output_dir, num_frames, keywords, max_files):
+def sample_frames(input_dir, output_dir, num_frames, keywords, max_files, max_duration):
     video_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]
     
     # Filter video files based on keywords
@@ -34,6 +34,9 @@ def sample_frames(input_dir, output_dir, num_frames, keywords, max_files):
     for video_file in video_files:
         clip = VideoFileClip(video_file)
         clip_duration = clip.duration
+        if clip_duration > max_duration:
+            print(f"Skipping {video_file} (duration: {clip_duration:.2f}s) - exceeds max duration of {max_duration:.2f}s")
+            continue
         fps = clip.fps
         num_frames_in_clip = int(clip_duration * fps)
         total_frames += num_frames_in_clip
@@ -74,6 +77,7 @@ def main():
     parser.add_argument('--num_frames', type=int, default=1000, help='Number of random frames to sample from the video files.')
     parser.add_argument('--keywords', type=str, help='Comma-separated list of keywords to filter input files by their filenames.')
     parser.add_argument('--max_files', type=int, help='Maximum number of input files to process.')
+    parser.add_argument('--max_duration', type=float, default=300, help='Maximum duration (in seconds) of input video files to process.')
 
     args = parser.parse_args()
 
@@ -82,8 +86,9 @@ def main():
     num_frames = args.num_frames
     keywords = args.keywords
     max_files = args.max_files
+    max_duration = args.max_duration
 
-    sample_frames(input_dir, output_dir, num_frames, keywords, max_files)
+    sample_frames(input_dir, output_dir, num_frames, keywords, max_files, max_duration)
 
 if __name__ == "__main__":
     main()
