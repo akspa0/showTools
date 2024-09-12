@@ -108,28 +108,37 @@ def create_sampler(input_dir, output_dir, duration, segment_duration, metadata_f
     target_duration = duration
 
     for entry in tqdm(metadata, desc="Processing metadata"):
-        filename = entry[0].split(': ')[1]
-        start = float(entry[1].split(': ')[1])
-        end = float(entry[2].split(': ')[1])
-        video_file = os.path.join(input_dir, filename)
+        try:
+            filename = entry[0].split(': ')[1]
+            start = float(entry[1].split(': ')[1])
+            end = float(entry[2].split(': ')[1])
+            video_file = os.path.join(input_dir, filename)
 
-        clip = VideoFileClip(video_file)
-        subclip = clip.subclip(start, end)
-        clips.append(subclip)
-        total_clips_duration += (end - start)
+            clip = VideoFileClip(video_file)
+            subclip = clip.subclip(start, end)
+            clips.append(subclip)
+            total_clips_duration += (end - start)
 
-        if total_clips_duration >= target_duration:
-            break
+            if total_clips_duration >= target_duration:
+                break
+        except (IndexError, ValueError) as e:
+            print(f"Error parsing metadata entry {entry}: {e}")
+        except Exception as e:
+            print(f"Error processing {video_file} from {start} to {end}: {e}")
 
     if glitch:
         random.shuffle(clips)  # Shuffle the collected clips to ensure randomness
 
-    final_clip = concatenate_videoclips(clips[:int(target_duration // segment_duration)])  # Concatenate only the necessary number of clips
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    output_file = os.path.join(output_dir, f'sampler_{duration}_{timestamp}.mp4')
-    final_clip.write_videofile(output_file, codec='libx264')
-    print(f'Sampler video saved as {output_file}')
-    return output_file
+    try:
+        final_clip = concatenate_videoclips(clips[:int(target_duration // segment_duration)])  # Concatenate only the necessary number of clips
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        output_file = os.path.join(output_dir, f'sampler_{duration}_{timestamp}.mp4')
+        final_clip.write_videofile(output_file, codec='libx264')
+        print(f'Sampler video saved as {output_file}')
+        return output_file
+    except Exception as e:
+        print(f"Error creating sampler video: {e}")
+        return None
 
 def sample_frames_from_video(video_file, output_dir, num_frames):
     clip = VideoFileClip(video_file)
