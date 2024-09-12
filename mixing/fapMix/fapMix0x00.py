@@ -43,26 +43,37 @@ def convert_to_wav_if_needed(input_dir, wav_output_dir):
         logging.debug(f"Found existing WAV files in {input_dir}. Copying them to {wav_output_dir}.")
         copy_wav_files(input_dir, wav_output_dir)
 
-def move_transcription_results(input_dir, output_dir):
-    """Move transcription results from the input_dir to output_dir."""
+def move_transcription_results(temp_dir, output_dir):
+    """Move transcription results from temp_dir (including sub-folders) to output_dir."""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    for root, dirs, files in os.walk(input_dir):
+    for root, dirs, files in os.walk(temp_dir):
         for file in files:
-            if file.endswith(".lab") or file.endswith(".txt"):
+            if file.endswith(".lab") or file.endswith(".wav"):
+                # Preserve folder structure relative to temp_dir
+                relative_path = os.path.relpath(root, temp_dir)
+                output_sub_dir = os.path.join(output_dir, relative_path)
+                
+                if not os.path.exists(output_sub_dir):
+                    os.makedirs(output_sub_dir)
+                
                 src_file = os.path.join(root, file)
-                dst_file = os.path.join(output_dir, file)
-                logging.debug(f"Moving transcription file: {src_file} to {dst_file}")
+                dst_file = os.path.join(output_sub_dir, file)
+                
+                logging.debug(f"Moving file: {src_file} to {dst_file}")
                 shutil.move(src_file, dst_file)
 
-def check_for_lab_files(input_dir):
-    """Check if any .lab files are present in the input_dir after transcription."""
-    lab_files = [f for f in os.listdir(input_dir) if f.endswith(".lab")]
-    if lab_files:
-        logging.debug(f".lab files found: {lab_files}")
-    else:
-        logging.error(f"No .lab files found in {input_dir}. Transcription may have failed.")
+def check_for_lab_files(temp_dir):
+    """Check if any .lab files are present in the temp_dir after transcription."""
+    lab_files_found = False
+    for root, dirs, files in os.walk(temp_dir):
+        if any(file.endswith(".lab") for file in files):
+            logging.debug(f".lab files found in {root}")
+            lab_files_found = True
+    
+    if not lab_files_found:
+        logging.error(f"No .lab files found in {temp_dir}. Transcription may have failed.")
 
 def main(input_dir, output_dir):
     # Create the output directory if it doesn't exist
@@ -101,7 +112,7 @@ def main(input_dir, output_dir):
         ]
         run_command(slice_command)
 
-        # Step 3: Transcribe audio files (transcribe output goes back into the input directory)
+        # Step 3: Transcribe audio files (transcribe output goes back into the slice_output_dir)
         logging.debug("Running transcription.")
         transcribe_command = [
             "fap", "transcribe",
@@ -111,10 +122,10 @@ def main(input_dir, output_dir):
         ]
         run_command(transcribe_command)
 
-        # Check for .lab files in the input directory
+        # Check for .lab files in the slice_output_dir
         check_for_lab_files(slice_output_dir)
 
-        # Move the transcription results to the output_dir
+        # Move the transcription results to the final output_dir, preserving sub-folder structure
         logging.debug("Moving transcription results to output folder.")
         move_transcription_results(slice_output_dir, output_dir)
 
