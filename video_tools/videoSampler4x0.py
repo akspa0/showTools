@@ -98,6 +98,8 @@ def search_frames(input_dir, output_dir, max_videos, segment_duration, keywords,
     return metadata_file
 
 def create_sampler(input_dir, output_dir, duration, segment_duration, metadata_file, glitch=False):
+    segment_duration = segment_duration or get_default_segment_duration(duration)
+    
     with open(metadata_file, 'r') as f:
         metadata = [line.strip().split(', ') for line in f.readlines()]
 
