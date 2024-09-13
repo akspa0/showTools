@@ -14,6 +14,12 @@ def setup_logging(log_file):
                         format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+def apply_file_timestamps(input_file, output_file):
+    """Applies the timestamp of the input file to the output file."""
+    input_stat = os.stat(input_file)
+    os.utime(output_file, (input_stat.st_atime, input_stat.st_mtime))
+
+
 def process_files(input_dir, output_dir):
     """Processes audio files with timestamp and stereo separation."""
     if not os.path.exists(output_dir):
@@ -37,8 +43,8 @@ def process_files(input_dir, output_dir):
             file_groups[timestamp].append(file)
 
     for timestamp, files in tqdm(file_groups.items(), desc="Processing files"):
-        left_files = [f for f in files if f.startswith('recv_out-')]
-        right_files = [f for f in files if f.startswith('trans_out-')]
+        left_files = [f for f in files if f.startswith('recv_out-') or f.endswith('_in.wav')]
+        right_files = [f for f in files if f.startswith('trans_out-') or f.endswith('_out.wav')]
 
         # Process left channel with timestamp in output filename
         for left_file in left_files:
@@ -47,6 +53,7 @@ def process_files(input_dir, output_dir):
             audio = AudioSegment.from_wav(input_path)
             audio.set_frame_rate(16000).set_sample_width(2).export(output_path, format="wav")
             logging.info(f'Processed left channel: {output_path}')
+            apply_file_timestamps(input_path, output_path)  # Apply timestamp to output
 
         # Process right channel with timestamp in output filename
         for right_file in right_files:
@@ -55,6 +62,7 @@ def process_files(input_dir, output_dir):
             audio = AudioSegment.from_wav(input_path)
             audio.set_frame_rate(16000).set_sample_width(2).export(output_path, format="wav")
             logging.info(f'Processed right channel: {output_path}')
+            apply_file_timestamps(input_path, output_path)  # Apply timestamp to output
 
         # Process stereo output with timestamp and adjust separation using pydub
         if left_files and right_files:
@@ -69,6 +77,7 @@ def process_files(input_dir, output_dir):
             stereo_audio = pan_and_merge(left_audio, right_audio)
             stereo_audio.export(combined_output, format="wav")
             logging.info(f'Processed stereo audio: {combined_output}')
+            apply_file_timestamps(left_input, combined_output)  # Apply timestamp to stereo output
 
 
 def pan_and_merge(left_channel, right_channel):
