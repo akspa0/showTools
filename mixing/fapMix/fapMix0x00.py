@@ -43,26 +43,31 @@ def convert_to_wav_if_needed(input_dir, wav_output_dir):
         logging.debug(f"Found existing WAV files in {input_dir}. Copying them to {wav_output_dir}.")
         copy_wav_files(input_dir, wav_output_dir)
 
-def move_transcription_results(temp_dir, output_dir):
-    """Move transcription results from temp_dir (including sub-folders) to output_dir."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+def extract_first_words_from_lab(lab_file_path, word_count=10):
+    """Extract the first 'word_count' words from the .lab file."""
+    with open(lab_file_path, 'r') as file:
+        content = file.read().strip()
     
+    words = content.split()
+    return ' '.join(words[:word_count])
+
+def rename_and_copy_wav_files(output_dir, temp_dir):
+    """Rename and copy WAV files with transcription text extracted from .lab files."""
     for root, dirs, files in os.walk(temp_dir):
         for file in files:
-            if file.endswith(".lab") or file.endswith(".wav"):
-                # Preserve folder structure relative to temp_dir
-                relative_path = os.path.relpath(root, temp_dir)
-                output_sub_dir = os.path.join(output_dir, relative_path)
+            if file.endswith(".lab"):
+                lab_file_path = os.path.join(root, file)
+                base_name = os.path.splitext(file)[0]
+                wav_file_path = os.path.join(root, f"{base_name}.wav")
                 
-                if not os.path.exists(output_sub_dir):
-                    os.makedirs(output_sub_dir)
-                
-                src_file = os.path.join(root, file)
-                dst_file = os.path.join(output_sub_dir, file)
-                
-                logging.debug(f"Moving file: {src_file} to {dst_file}")
-                shutil.move(src_file, dst_file)
+                if os.path.exists(wav_file_path):
+                    transcription_text = extract_first_words_from_lab(lab_file_path)
+                    safe_text = ''.join(c if c.isalnum() or c.isspace() else '_' for c in transcription_text)  # Sanitize text
+                    new_wav_file_name = f"{base_name}-{safe_text}.wav"
+                    new_wav_file_path = os.path.join(output_dir, new_wav_file_name)
+                    
+                    logging.debug(f"Copying and renaming file: {wav_file_path} to {new_wav_file_path}")
+                    shutil.copy2(wav_file_path, new_wav_file_path)
 
 def check_for_lab_files(temp_dir):
     """Check if any .lab files are present in the temp_dir after transcription."""
@@ -112,7 +117,7 @@ def main(input_dir, output_dir):
         ]
         run_command(slice_command)
 
-        # Step 3: Transcribe audio files (transcribe output goes back into the slice_output_dir)
+        # Step 3: Transcribe audio files
         logging.debug("Running transcription.")
         transcribe_command = [
             "fap", "transcribe",
@@ -125,9 +130,9 @@ def main(input_dir, output_dir):
         # Check for .lab files in the slice_output_dir
         check_for_lab_files(slice_output_dir)
 
-        # Move the transcription results to the final output_dir, preserving sub-folder structure
-        logging.debug("Moving transcription results to output folder.")
-        move_transcription_results(slice_output_dir, output_dir)
+        # Rename and copy WAV files with transcription text
+        logging.debug("Renaming and copying WAV files with transcription text.")
+        rename_and_copy_wav_files(output_dir, slice_output_dir)
 
     finally:
         # Keeping temporary files for inspection instead of deleting
