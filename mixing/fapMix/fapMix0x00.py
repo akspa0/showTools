@@ -47,7 +47,7 @@ def convert_to_wav_if_needed(input_dir, wav_output_dir):
 
 def extract_first_chars_from_lab(lab_file_path, char_limit=40):
     """Extract the first 'char_limit' characters from the .lab file."""
-    with open(lab_file_path, 'r') as file:
+    with open(lab_file_path, 'r', encoding='utf-8', errors='replace') as file:
         content = file.read().strip()
     
     return content[:char_limit]
