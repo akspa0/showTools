@@ -15,20 +15,32 @@ def run_command(command):
     logging.debug(f"Running command: {' '.join(command)}")
     subprocess.run(command, check=True)
 
-def copy_wav_files(input_dir, wav_output_dir):
-    """Copy existing WAV files from input directory to wav_output_dir."""
-    if not os.path.exists(wav_output_dir):
-        os.makedirs(wav_output_dir)
-    
+def filter_files(input_dir, vocals_only, pbx_only):
+    """Filter files based on the given options."""
     for root, dirs, files in os.walk(input_dir):
         for file in files:
             if file.endswith(".wav"):
-                src_file = os.path.join(root, file)
-                dst_file = os.path.join(wav_output_dir, file)
-                logging.debug(f"Copying WAV file: {src_file} to {dst_file}")
-                shutil.copy2(src_file, dst_file)
+                if vocals_only:
+                    if "(Vocals)" in file:
+                        yield os.path.join(root, file)
+                elif pbx_only:
+                    if "recv_out" in file or "trans_out" in file:
+                        yield os.path.join(root, file)
+                else:
+                    yield os.path.join(root, file)
 
-def convert_to_wav_if_needed(input_dir, wav_output_dir):
+def copy_wav_files(input_dir, wav_output_dir, vocals_only, pbx_only):
+    """Copy WAV files from input directory to wav_output_dir based on the filter."""
+    if not os.path.exists(wav_output_dir):
+        os.makedirs(wav_output_dir)
+
+    for file_path in filter_files(input_dir, vocals_only, pbx_only):
+        file_name = os.path.basename(file_path)
+        dst_file = os.path.join(wav_output_dir, file_name)
+        logging.debug(f"Copying WAV file: {file_path} to {dst_file}")
+        shutil.copy2(file_path, dst_file)
+
+def convert_to_wav_if_needed(input_dir, wav_output_dir, vocals_only, pbx_only):
     """Check if the input directory contains any WAV files, if not, convert to WAV."""
     wav_files = [f for f in os.listdir(input_dir) if f.endswith(".wav")]
     
@@ -43,17 +55,21 @@ def convert_to_wav_if_needed(input_dir, wav_output_dir):
         run_command(to_wav_command)
     else:  # Copy existing WAV files to wav_output_dir
         logging.debug(f"Found existing WAV files in {input_dir}. Copying them to {wav_output_dir}.")
-        copy_wav_files(input_dir, wav_output_dir)
+        copy_wav_files(input_dir, wav_output_dir, vocals_only, pbx_only)
 
 def extract_first_chars_from_lab(lab_file_path, char_limit=40):
     """Extract the first 'char_limit' characters from the .lab file."""
-    with open(lab_file_path, 'r', encoding='utf-8', errors='replace') as file:
+    with open(lab_file_path, 'r', encoding='utf-8', errors='ignore') as file:
         content = file.read().strip()
     
     return content[:char_limit]
 
-def rename_and_copy_files(output_dir, temp_dir):
+def rename_and_copy_files(output_dir, temp_dir, pbx_only):
     """Rename and copy WAV files with transcription text and include .lab files."""
+    lab_dataset_dir = os.path.join(output_dir, "lab_dataset")
+    if not os.path.exists(lab_dataset_dir):
+        os.makedirs(lab_dataset_dir)
+    
     for root, dirs, files in os.walk(temp_dir):
         for file in files:
             if file.endswith(".lab"):
@@ -77,10 +93,16 @@ def rename_and_copy_files(output_dir, temp_dir):
                     logging.debug(f"Copying and renaming file: {wav_file_path} to {new_wav_file_path}")
                     shutil.copy2(wav_file_path, new_wav_file_path)
                     
-                    # Copy .lab file to the same sub-folder
-                    new_lab_file_path = os.path.join(output_subfolder, file)
+                    # Copy .lab file to the lab dataset sub-folder
+                    new_lab_file_path = os.path.join(lab_dataset_dir, file)
                     logging.debug(f"Copying .lab file: {lab_file_path} to {new_lab_file_path}")
                     shutil.copy2(lab_file_path, new_lab_file_path)
+
+                # Copy original WAV file to output directory if not processed
+                if not pbx_only:
+                    original_wav_file_path = os.path.join(output_dir, os.path.basename(wav_file_path))
+                    logging.debug(f"Copying original WAV file: {wav_file_path} to {original_wav_file_path}")
+                    shutil.copy2(wav_file_path, original_wav_file_path)
 
 def check_for_lab_files(temp_dir):
     """Check if any .lab files are present in the temp_dir after transcription."""
@@ -137,7 +159,20 @@ def zip_output_folder(output_dir):
                 logging.debug(f"Adding file to zip: {file_path}")
                 zipf.write(file_path, arcname)
 
-def main(input_dir, zip_output):
+def zip_lab_dataset(lab_dataset_dir):
+    """Zip the lab dataset folder."""
+    zip_file_name = f"{lab_dataset_dir}.zip"
+    logging.debug(f"Creating lab dataset zip file: {zip_file_name}")
+    
+    with zipfile.ZipFile(zip_file_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(lab_dataset_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=lab_dataset_dir)
+                logging.debug(f"Adding file to lab dataset zip: {file_path}")
+                zipf.write(file_path, arcname)
+
+def main(input_dir, zip_output, vocals_only, pbx_only):
     # Generate output directory name and create it
     output_dir = generate_output_folder_name(input_dir)
     if not os.path.exists(output_dir):
@@ -152,7 +187,7 @@ def main(input_dir, zip_output):
     try:
         # Convert non-WAV files to WAV or copy existing WAV files
         logging.debug(f"Starting WAV conversion/check for {input_dir}.")
-        convert_to_wav_if_needed(input_dir, wav_output_dir)
+        convert_to_wav_if_needed(input_dir, wav_output_dir, vocals_only, pbx_only)
 
         # Step 1: Normalize loudness (output to norm_output_dir)
         logging.debug("Running loudness normalization.")
@@ -190,11 +225,16 @@ def main(input_dir, zip_output):
 
         # Rename and copy WAV files with transcription text, and include .lab files
         logging.debug("Renaming and copying WAV files with transcription text.")
-        rename_and_copy_files(output_dir, slice_output_dir)
+        rename_and_copy_files(output_dir, slice_output_dir, pbx_only)
 
         # Zip the output folder if specified
         if zip_output:
             zip_output_folder(output_dir)
+        
+        # Zip the lab dataset folder
+        lab_dataset_dir = os.path.join(output_dir, "lab_dataset")
+        if os.path.exists(lab_dataset_dir):
+            zip_lab_dataset(lab_dataset_dir)
 
     finally:
         # Keeping temporary files for inspection instead of deleting
@@ -202,12 +242,12 @@ def main(input_dir, zip_output):
         print(f"Temporary files are saved in: {temp_dir}")
 
 if __name__ == "__main__":
-    # Argument parser for input directory and zip option
-    parser = argparse.ArgumentParser(description="Process audio files with fap tools.")
-    parser.add_argument("input_dir", help="The input directory containing audio files.")
-    parser.add_argument("--zip", action="store_true", help="Create a zip file of the output folder.")
-
+    # Argument parser for input directory and options
+    parser = argparse.ArgumentParser(description="Process audio files and transcripts.")
+    parser.add_argument("input_dir", help="Directory containing input audio files.")
+    parser.add_argument("--zip", action="store_true", help="Zip the output folder.")
+    parser.add_argument("--vocals-only", action="store_true", help="Process only files with '(Vocals)' in the filename.")
+    parser.add_argument("--pbx", action="store_true", help="Process only files named 'recv_out' and 'trans_out'.")
     args = parser.parse_args()
-
-    # Run the main function
-    main(args.input_dir, args.zip)
+    
+    main(args.input_dir, args.zip, args.vocals_only, args.pbx)
