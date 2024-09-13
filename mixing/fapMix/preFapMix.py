@@ -1,90 +1,99 @@
 import os
-import re
-import subprocess
 import logging
-import argparse
+from pydub import AudioSegment
+from tqdm import tqdm
 from datetime import datetime
 
-# Set up logging
-def setup_logging():
-    log_filename = f"process_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logging.basicConfig(filename=log_filename, level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def create_subdirectories(output_dir):
-    os.makedirs(os.path.join(output_dir, 'left'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'right'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'stereo'), exist_ok=True)
+def setup_logging(log_file):
+    """Sets up logging for the script."""
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    logging.basicConfig(filename=log_file, level=logging.DEBUG,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
 
-def run_command(command):
-    try:
-        logging.debug(f"Running command: {' '.join(command)}")
-        result = subprocess.run(command, check=True, text=True, capture_output=True)
-        logging.debug(f"Command output: {result.stdout}")
-        return result
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Command failed with error: {e.stderr}")
-        raise
-
-def extract_timestamp(filename):
-    match = re.search(r'(\d{10})\.\d{3}', filename)
-    return match.group(1) if match else None
 
 def process_files(input_dir, output_dir):
-    create_subdirectories(output_dir)
+    """Processes audio files with timestamp and stereo separation."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    left_dir = os.path.join(output_dir, 'left')
+    right_dir = os.path.join(output_dir, 'right')
+    stereo_dir = os.path.join(output_dir, 'stereo')
+    for d in [left_dir, right_dir, stereo_dir]:
+        if not os.path.exists(d):
+            os.makedirs(d)
 
     files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-    file_groups = {}
+    file_groups = {}  # Dictionary to group files by timestamp
 
-    # Group files by timestamp
     for file in files:
-        timestamp = extract_timestamp(file)
-        if timestamp:
-            prefix = file.split('-')[0]
-            suffix = file.split('_')[-1].split('.')[0]
+        if file.lower().endswith('.wav') and os.path.getsize(os.path.join(input_dir, file)) >= 10240:  # Ignore files less than 10KB
+            timestamp = file.split('-')[-1].split('.')[0]  # Extract timestamp
+            if timestamp not in file_groups:
+                file_groups[timestamp] = []
+            file_groups[timestamp].append(file)
 
-            if prefix in ['trans_out', 'recv_out'] or suffix in ['in', 'out']:
-                if timestamp not in file_groups:
-                    file_groups[timestamp] = {'trans_out': None, 'recv_out': None, 'in': None, 'out': None}
+    for timestamp, files in tqdm(file_groups.items(), desc="Processing files"):
+        left_files = [f for f in files if f.startswith('recv_out-')]
+        right_files = [f for f in files if f.startswith('trans_out-')]
 
-                if prefix == 'trans_out':
-                    file_groups[timestamp]['trans_out'] = file
-                elif prefix == 'recv_out':
-                    file_groups[timestamp]['recv_out'] = file
-                elif suffix == 'in':
-                    file_groups[timestamp]['in'] = file
-                elif suffix == 'out':
-                    file_groups[timestamp]['out'] = file
+        # Process left channel with timestamp in output filename
+        for left_file in left_files:
+            input_path = os.path.join(input_dir, left_file)
+            output_path = os.path.join(left_dir, f'{timestamp}_{left_file}')
+            audio = AudioSegment.from_wav(input_path)
+            audio.set_frame_rate(16000).set_sample_width(2).export(output_path, format="wav")
+            logging.info(f'Processed left channel: {output_path}')
 
-    # Process each group
-    for timestamp, files in file_groups.items():
-        file_paths = {key: os.path.join(input_dir, file) for key, file in files.items() if file}
-        if not file_paths:
-            continue
-        
-        # Extract channels
-        for key in ['trans_out', 'recv_out']:
-            if key in file_paths:
-                channel_type = 'left' if key == 'trans_out' else 'right'
-                output_path = os.path.join(output_dir, channel_type, f"{timestamp}.wav")
-                run_command(['ffmpeg', '-i', file_paths[key], output_path])
+        # Process right channel with timestamp in output filename
+        for right_file in right_files:
+            input_path = os.path.join(input_dir, right_file)
+            output_path = os.path.join(right_dir, f'{timestamp}_{right_file}')
+            audio = AudioSegment.from_wav(input_path)
+            audio.set_frame_rate(16000).set_sample_width(2).export(output_path, format="wav")
+            logging.info(f'Processed right channel: {output_path}')
 
-        # Combine channels into stereo
-        left_file = os.path.join(output_dir, 'left', f"{timestamp}.wav")
-        right_file = os.path.join(output_dir, 'right', f"{timestamp}.wav")
+        # Process stereo output with timestamp and adjust separation using pydub
+        if left_files and right_files:
+            left_input = os.path.join(left_dir, f'{timestamp}_{left_files[0]}')
+            right_input = os.path.join(right_dir, f'{timestamp}_{right_files[0]}')
+            combined_output = os.path.join(stereo_dir, f'combined-{left_files[0]}.wav')  # Use combined filename
 
-        if os.path.exists(left_file) and os.path.exists(right_file):
-            stereo_file = os.path.join(output_dir, 'stereo', f"{timestamp}_stereo.wav")
-            run_command(['ffmpeg', '-i', left_file, '-i', right_file, '-filter_complex', 'amerge=inputs=2,pan=stereo|c0=c0|c1=c1', stereo_file])
+            left_audio = AudioSegment.from_wav(left_input)
+            right_audio = AudioSegment.from_wav(right_input)
 
-def main():
-    parser = argparse.ArgumentParser(description="Process audio files and generate separated and combined outputs.")
-    parser.add_argument('input_dir', type=str, help='Path to the input directory containing audio files.')
-    parser.add_argument('output_dir', type=str, help='Path to the output directory where processed files will be saved.')
+            # Pan and merge using pydub
+            stereo_audio = pan_and_merge(left_audio, right_audio)
+            stereo_audio.export(combined_output, format="wav")
+            logging.info(f'Processed stereo audio: {combined_output}')
 
-    args = parser.parse_args()
 
-    setup_logging()
-    process_files(args.input_dir, args.output_dir)
+def pan_and_merge(left_channel, right_channel):
+    """
+    Applies panning to left and right channels and merges them into a stereo track.
+    Left channel is panned slightly left, right channel is panned slightly right.
+    """
+    # Pan channels
+    panned_left = left_channel.pan(-0.2)
+    panned_right = right_channel.pan(0.2)
+
+    # Merge channels for stereo output
+    stereo_audio = panned_left.overlay(panned_right)
+    return stereo_audio
+
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Process audio files.')
+    parser.add_argument('input_dir', type=str, help='Directory containing input audio files.')
+    parser.add_argument('output_dir', type=str, help='Directory to store output files.')
+    args = parser.parse_args()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(args.output_dir, f'{timestamp}_processing_log.txt')
+    setup_logging(log_file)
+
+    process_files(args.input_dir, args.output_dir)
