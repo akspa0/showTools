@@ -93,27 +93,35 @@ def check_for_lab_files(temp_dir):
     if not lab_files_found:
         logging.error(f"No .lab files found in {temp_dir}. Transcription may have failed.")
 
-def generate_output_folder_name(input_dir):
-    """Generate a unique output folder name based on the oldest date in the input files."""
-    date_pattern = re.compile(r'\d{8}')  # Pattern to match dates in YYYYMMDD format
-    oldest_date = None
+def find_oldest_timestamp(input_dir):
+    """Find the oldest timestamp from files in the input directory."""
+    oldest_timestamp = None
     
     for root, dirs, files in os.walk(input_dir):
         for file in files:
-            match = date_pattern.search(file)
-            if match:
-                file_date = datetime.strptime(match.group(), "%Y%m%d")
-                if oldest_date is None or file_date < oldest_date:
-                    oldest_date = file_date
+            file_path = os.path.join(root, file)
+            try:
+                timestamp = os.path.getmtime(file_path)  # Get modification time
+                if oldest_timestamp is None or timestamp < oldest_timestamp:
+                    oldest_timestamp = timestamp
+            except Exception as e:
+                logging.error(f"Error getting timestamp for {file_path}: {e}")
     
-    if oldest_date:
-        month_name = oldest_date.strftime("%B")  # Full month name
-        folder_name = f"{oldest_date.day:02d}{month_name}{oldest_date.year}-snippets"
+    return oldest_timestamp
+
+def generate_output_folder_name(input_dir):
+    """Generate a unique output folder name based on the oldest file timestamp."""
+    oldest_timestamp = find_oldest_timestamp(input_dir)
+    
+    if oldest_timestamp:
+        date_time = datetime.fromtimestamp(oldest_timestamp)
+        month_name = date_time.strftime("%B")  # Full month name
+        folder_name = f"{date_time.day:02d}{month_name}{date_time.year}-snippets"
         return folder_name
     else:
-        # Fallback if no date found
+        # Fallback if no timestamp found
         folder_name = f"UnknownDate-snippets"
-        logging.warning("No valid dates found in input files. Using default folder name.")
+        logging.warning("No valid timestamps found in input files. Using default folder name.")
         return folder_name
 
 def main(input_dir):
