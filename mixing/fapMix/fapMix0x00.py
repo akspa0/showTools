@@ -43,16 +43,15 @@ def convert_to_wav_if_needed(input_dir, wav_output_dir):
         logging.debug(f"Found existing WAV files in {input_dir}. Copying them to {wav_output_dir}.")
         copy_wav_files(input_dir, wav_output_dir)
 
-def extract_first_words_from_lab(lab_file_path, word_count=10):
-    """Extract the first 'word_count' words from the .lab file."""
+def extract_first_chars_from_lab(lab_file_path, char_limit=40):
+    """Extract the first 'char_limit' characters from the .lab file."""
     with open(lab_file_path, 'r') as file:
         content = file.read().strip()
     
-    words = content.split()
-    return ' '.join(words[:word_count])
+    return content[:char_limit]
 
-def rename_and_copy_wav_files(output_dir, temp_dir):
-    """Rename and copy WAV files with transcription text extracted from .lab files."""
+def rename_and_copy_files(output_dir, temp_dir):
+    """Rename and copy WAV files with transcription text and include .lab files."""
     for root, dirs, files in os.walk(temp_dir):
         for file in files:
             if file.endswith(".lab"):
@@ -61,23 +60,23 @@ def rename_and_copy_wav_files(output_dir, temp_dir):
                 wav_file_path = os.path.join(root, f"{base_name}.wav")
                 
                 if os.path.exists(wav_file_path):
-                    transcription_text = extract_first_words_from_lab(lab_file_path)
+                    transcription_text = extract_first_chars_from_lab(lab_file_path)
                     safe_text = ''.join(c if c.isalnum() or c.isspace() else '_' for c in transcription_text)  # Sanitize text
                     new_wav_file_name = f"{base_name}-{safe_text}.wav"
                     
-                    # Create corresponding sub-folder in output directory
+                    # Maintain sub-folder structure
                     relative_path = os.path.relpath(root, temp_dir)
-                    new_sub_folder = os.path.join(output_dir, relative_path)
-                    if not os.path.exists(new_sub_folder):
-                        os.makedirs(new_sub_folder)
+                    output_subfolder = os.path.join(output_dir, relative_path)
+                    if not os.path.exists(output_subfolder):
+                        os.makedirs(output_subfolder)
                     
-                    new_wav_file_path = os.path.join(new_sub_folder, new_wav_file_name)
-                    
+                    # Copy renamed .wav file
+                    new_wav_file_path = os.path.join(output_subfolder, new_wav_file_name)
                     logging.debug(f"Copying and renaming file: {wav_file_path} to {new_wav_file_path}")
                     shutil.copy2(wav_file_path, new_wav_file_path)
                     
-                    # Copy the corresponding .lab file to the new sub-folder
-                    new_lab_file_path = os.path.join(new_sub_folder, f"{base_name}.lab")
+                    # Copy .lab file to the same sub-folder
+                    new_lab_file_path = os.path.join(output_subfolder, file)
                     logging.debug(f"Copying .lab file: {lab_file_path} to {new_lab_file_path}")
                     shutil.copy2(lab_file_path, new_lab_file_path)
 
@@ -142,9 +141,9 @@ def main(input_dir, output_dir):
         # Check for .lab files in the slice_output_dir
         check_for_lab_files(slice_output_dir)
 
-        # Rename and copy WAV files with transcription text
+        # Rename and copy WAV files with transcription text, and include .lab files
         logging.debug("Renaming and copying WAV files with transcription text.")
-        rename_and_copy_wav_files(output_dir, slice_output_dir)
+        rename_and_copy_files(output_dir, slice_output_dir)
 
     finally:
         # Keeping temporary files for inspection instead of deleting
