@@ -64,10 +64,22 @@ def rename_and_copy_wav_files(output_dir, temp_dir):
                     transcription_text = extract_first_words_from_lab(lab_file_path)
                     safe_text = ''.join(c if c.isalnum() or c.isspace() else '_' for c in transcription_text)  # Sanitize text
                     new_wav_file_name = f"{base_name}-{safe_text}.wav"
-                    new_wav_file_path = os.path.join(output_dir, new_wav_file_name)
+                    
+                    # Create corresponding sub-folder in output directory
+                    relative_path = os.path.relpath(root, temp_dir)
+                    new_sub_folder = os.path.join(output_dir, relative_path)
+                    if not os.path.exists(new_sub_folder):
+                        os.makedirs(new_sub_folder)
+                    
+                    new_wav_file_path = os.path.join(new_sub_folder, new_wav_file_name)
                     
                     logging.debug(f"Copying and renaming file: {wav_file_path} to {new_wav_file_path}")
                     shutil.copy2(wav_file_path, new_wav_file_path)
+                    
+                    # Copy the corresponding .lab file to the new sub-folder
+                    new_lab_file_path = os.path.join(new_sub_folder, f"{base_name}.lab")
+                    logging.debug(f"Copying .lab file: {lab_file_path} to {new_lab_file_path}")
+                    shutil.copy2(lab_file_path, new_lab_file_path)
 
 def check_for_lab_files(temp_dir):
     """Check if any .lab files are present in the temp_dir after transcription."""
