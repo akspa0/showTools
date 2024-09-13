@@ -1,63 +1,54 @@
-# fapMix0x00.py
+# Audio File Processing Script
 
-`fapMix0x00.py` is a Python script for processing audio files using `fish-audio-preprocess` (fap) tools. This script automates the process of converting audio files to WAV format, normalizing their loudness, slicing them into manageable chunks, and transcribing the audio. It then renames the audio files based on their transcriptions and organizes the output in a structured directory.
+This script, `fapMix0x00.py`, processes audio files by converting them to WAV format, normalizing their loudness, slicing them, and transcribing them. It also renames files based on transcription text and can package the final output into a zip file.
+
+## Features
+
+- **Convert to WAV**: Converts non-WAV audio files to WAV format.
+- **Normalize Loudness**: Applies loudness normalization to the WAV files.
+- **Slice Audio**: Slices the audio files into shorter segments.
+- **Transcribe Audio**: Transcribes the sliced audio files.
+- **Rename Files**: Renames WAV files based on transcription text and preserves the folder structure.
+- **Zip Output**: Optionally packages the processed output into a zip file.
+- **Temporary Files**: Keeps temporary files for debugging and inspection if needed.
 
 ## Requirements
 
 - Python 3.x
-- `fish-audio-preprocess` (fap) tools (https://github.com/fishaudio/audio-preprocess)
-- Necessary dependencies should be installed (`argparse`, `subprocess`, `shutil`, `tempfile`, `logging`).
+- `fap` command-line tool (for audio processing tasks) - https://github.com/fishaudio/audio-preprocess
 
 ## Usage
 
-```bash
-python fapMix0x00.py <input_dir> <output_dir>
-```
-
-### Arguments
-
-- `<input_dir>`: The directory containing the input audio files. This directory can include files in various formats.
-- `<output_dir>`: The directory where the processed files will be saved. The script will create this directory if it does not exist.
-
-## Steps Performed by the Script
-
-1. **Check and Convert to WAV**:
-   - The script checks if there are WAV files in the input directory.
-   - If no WAV files are found, it converts the audio files to WAV format.
-
-2. **Loudness Normalization**:
-   - Normalizes the loudness of all WAV files in the input directory.
-
-3. **Audio Slicing**:
-   - Slices the normalized audio files into chunks of a minimum duration of 3 seconds.
-
-4. **Transcription**:
-   - Transcribes the sliced audio files into text.
-
-5. **Renaming and Copying**:
-   - Renames the WAV files based on the first 40 characters from their corresponding `.lab` files.
-   - Copies the renamed WAV files and `.lab` files into the output directory, preserving the directory structure.
-
-6. **Temporary Files**:
-   - Temporary files and directories are kept intact for manual inspection after script execution.
-
-## Example
+### Basic Usage
 
 ```bash
-python fapMix0x00.py /path/to/input_dir /path/to/output_dir
+python fapMix0x00.py <input_dir> [--zip]
 ```
 
-This command will process the audio files located in `/path/to/input_dir` and save the results in `/path/to/output_dir`.
+- `<input_dir>`: Path to the directory containing audio files.
+- `--zip` (optional): Create a zip file of the output folder.
 
-## Troubleshooting
+### Example
 
-- **No `.lab` files found**: Verify that the transcription step completed successfully. The script logs messages if `.lab` files are not found.
-- **Output issues**: Ensure that `fish-audio-preprocess` (fap) tools are properly installed and accessible in your PATH.
+```bash
+python fapMix0x00.py /path/to/audio/files --zip
+```
 
-## License
+This will process the files in `/path/to/audio/files`, and if the `--zip` option is provided, it will create a zip file of the output folder.
 
-This script is provided as-is without any warranty. Use it at your own risk.
+## Script Details
 
-## Contact
+1. **Convert to WAV**: If no WAV files are found in the input directory, the script converts all audio files to WAV format.
+2. **Normalize Loudness**: Normalizes the loudness of the WAV files.
+3. **Slice Audio**: Slices the normalized audio files into segments of at least 3 seconds.
+4. **Transcribe Audio**: Transcribes the sliced audio files using the `fap` tool.
+5. **Rename and Copy Files**: Renames WAV files based on the transcription text and copies them to the output directory while preserving the folder structure.
+6. **Zip Output**: Creates a zip file of the output directory if the `--zip` option is specified.
 
-For issues or questions, please reach out to the author or maintainers.
+## Logging
+
+- Logs are generated for debugging purposes and include detailed information about the processing steps. The logs are saved with timestamps to aid in tracking issues.
+
+## Temporary Files
+
+- Temporary files are stored in a timestamped temporary directory created by the script. This directory is preserved for manual inspection if debugging is needed. If the `--debug` flag is not used, the temporary files will not be deleted.
