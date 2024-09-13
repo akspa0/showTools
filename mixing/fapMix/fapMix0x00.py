@@ -4,6 +4,7 @@ import subprocess
 import shutil
 import tempfile
 import logging
+from datetime import datetime
 
 # Setup logging for debugging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -91,11 +92,19 @@ def check_for_lab_files(temp_dir):
     if not lab_files_found:
         logging.error(f"No .lab files found in {temp_dir}. Transcription may have failed.")
 
-def main(input_dir, output_dir):
-    # Create the output directory if it doesn't exist
+def generate_output_folder_name():
+    """Generate a unique output folder name based on the current date and time."""
+    now = datetime.now()
+    month_name = now.strftime("%B")  # Full month name
+    folder_name = f"{now.day:02d}{month_name}{now.year}-snippets"
+    return folder_name
+
+def main(input_dir):
+    # Generate output directory name and create it
+    output_dir = generate_output_folder_name()
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-
+    
     # Create temporary directories for intermediate files
     temp_dir = tempfile.mkdtemp()
     wav_output_dir = os.path.join(temp_dir, "wav_files")
@@ -151,12 +160,11 @@ def main(input_dir, output_dir):
         print(f"Temporary files are saved in: {temp_dir}")
 
 if __name__ == "__main__":
-    # Argument parser for input and output directories
+    # Argument parser for input directory
     parser = argparse.ArgumentParser(description="Process audio files with fap tools.")
     parser.add_argument("input_dir", help="The input directory containing audio files.")
-    parser.add_argument("output_dir", help="The output directory to save the processed files.")
 
     args = parser.parse_args()
 
     # Run the main function
-    main(args.input_dir, args.output_dir)
+    main(args.input_dir)
