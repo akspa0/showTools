@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import logging
 from datetime import datetime
-import re
+import zipfile
 
 # Setup logging for debugging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -124,7 +124,20 @@ def generate_output_folder_name(input_dir):
         logging.warning("No valid timestamps found in input files. Using default folder name.")
         return folder_name
 
-def main(input_dir):
+def zip_output_folder(output_dir):
+    """Zip the output folder."""
+    zip_file_name = f"{output_dir}.zip"
+    logging.debug(f"Creating zip file: {zip_file_name}")
+    
+    with zipfile.ZipFile(zip_file_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(output_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=output_dir)
+                logging.debug(f"Adding file to zip: {file_path}")
+                zipf.write(file_path, arcname)
+
+def main(input_dir, zip_output):
     # Generate output directory name and create it
     output_dir = generate_output_folder_name(input_dir)
     if not os.path.exists(output_dir):
@@ -179,17 +192,22 @@ def main(input_dir):
         logging.debug("Renaming and copying WAV files with transcription text.")
         rename_and_copy_files(output_dir, slice_output_dir)
 
+        # Zip the output folder if specified
+        if zip_output:
+            zip_output_folder(output_dir)
+
     finally:
         # Keeping temporary files for inspection instead of deleting
         logging.debug(f"Temporary files are stored in {temp_dir}. Please inspect manually.")
         print(f"Temporary files are saved in: {temp_dir}")
 
 if __name__ == "__main__":
-    # Argument parser for input directory
+    # Argument parser for input directory and zip option
     parser = argparse.ArgumentParser(description="Process audio files with fap tools.")
     parser.add_argument("input_dir", help="The input directory containing audio files.")
+    parser.add_argument("--zip", action="store_true", help="Create a zip file of the output folder.")
 
     args = parser.parse_args()
 
     # Run the main function
-    main(args.input_dir)
+    main(args.input_dir, args.zip)
