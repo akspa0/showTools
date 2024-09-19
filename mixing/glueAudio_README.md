@@ -1,105 +1,95 @@
-# Audio Merging Script
+# Audio Merger Script
 
-This Python script recursively merges audio files from subfolders. It processes audio files whose filenames start with a prefix between `1-9999` followed by a dash (`-`). The valid audio files are merged into one long track for each subfolder and saved in a corresponding output directory.
+This script merges audio files from subfolders into single merged files. By default, it processes all audio files found in a folder hierarchy and merges them into a single audio file for each subfolder. Optionally, the script can restrict processing to only audio files that have a numerical prefix (1-9999) followed by a dash (`-`).
 
 ## Features
 
-- **Recursively processes subfolders**: The script traverses through all subfolders in the specified input folder.
-- **Merges valid audio files**: Only files with a numeric prefix (e.g., `1-file.wav`, `234-description.wav`) are merged.
-- **Flexible audio formats**: Supports `.wav`, `.mp3`, `.ogg`, and `.flac` formats.
-- **Automatic directory creation**: Ensures that output directories are created if they don't already exist.
-- **Organized output**: Each merged track is saved in a corresponding output folder, preserving the subfolder structure from the input directory.
+- **Process all audio files**: The script processes all found audio files by default, regardless of their names.
+- **Optional prefix filter**: Restrict merging to files with a 1-9999 numerical prefix by using the `--use-prefix` option.
+- **Supports multiple formats**: The script can process `.wav`, `.mp3`, `.ogg`, and `.flac` files.
+- **Error handling**: Files that cannot be decoded (e.g., corrupted or invalid files) are skipped, and a warning message is shown.
+- **Automatic directory creation**: The script ensures that output directories are created as needed, avoiding errors due to missing directories.
 
-## Prerequisites
+## Requirements
 
-1. **Python 3.x**
-2. **pydub** for handling audio merging:
-   ```bash
-   pip install pydub
-   ```
-3. **FFmpeg** installed on your system (required by `pydub` for encoding/decoding audio files).
-   - [FFmpeg Installation Guide](https://ffmpeg.org/download.html)
+- Python 3.6+
+- [pydub](https://github.com/jiaaro/pydub)
+- [ffmpeg](https://www.ffmpeg.org/)
+
+### Install dependencies
+
+```bash
+pip install pydub
+```
+
+Make sure `ffmpeg` is installed and accessible via your system's PATH. You can download it from [here](https://www.ffmpeg.org/download.html).
 
 ## Usage
 
-### Command Line
+```bash
+python glueAudio.py <input_folder> <output_folder> [--use-prefix]
+```
 
-Run the script from the terminal with the following syntax:
+### Arguments:
+
+- `input_folder`: The root folder containing subfolders with audio files to merge.
+- `output_folder`: The root folder where the merged audio files will be saved.
+
+### Options:
+
+- `--use-prefix`: If provided, only audio files with a 1-9999 prefix (e.g., `1-some_audio.wav`) will be processed. By default, all audio files are processed regardless of the filename prefix.
+
+### Example:
+
+To merge all audio files in subfolders under `/path/to/input/folder`, and save the merged files to `/path/to/output/folder`:
 
 ```bash
 python glueAudio.py /path/to/input/folder /path/to/output/folder
 ```
 
-### Arguments
-
-- **`/path/to/input/folder`**: The root folder containing subfolders of audio files to merge.
-- **`/path/to/output/folder`**: The root folder where merged audio files will be saved. The output folder structure mirrors the input folder structure.
-
-### Example
-
-Given the following directory structure:
-
-```
-input_folder/
-    subfolder1/
-        1-audio.wav
-        2-audio.mp3
-        invalid.wav
-    subfolder2/
-        10-intro.wav
-        234-part.wav
-```
-
-After running the command:
+To only process files with a prefix (e.g., `1-audio.wav`, `9999-audio.mp3`) and skip other files:
 
 ```bash
-python glueAudio.py /input_folder /output_folder
+python glueAudio.py /path/to/input/folder /path/to/output/folder --use-prefix
 ```
 
-The output directory will contain:
+### Handling Errors
+
+If any file cannot be decoded (e.g., corrupted or unsupported files), the script will skip that file and print a warning message:
 
 ```
-output_folder/
-    subfolder1/
-        merged_audio.wav
-    subfolder2/
-        merged_audio.wav
+Warning: Could not decode /path/to/file.wav, skipping this file.
 ```
 
-### Error Handling
+The rest of the valid files will still be merged as intended.
 
-- If no valid files are found in a subfolder, that subfolder will be skipped.
-- If any intermediate directory (e.g., `Full-Audio`) does not exist, it will be created automatically.
+## Output Structure
 
-## Code Overview
+For each subfolder in the `input_folder`, the script will create a corresponding folder in the `output_folder`. Inside each output subfolder, a file named `merged_audio.wav` will be generated, containing the merged audio of all valid files from the corresponding input subfolder.
 
-### Main Functions
+### Example Directory Structure:
 
-1. **`is_valid_audio(filename)`**: 
-   - Returns `True` if the file starts with a numeric prefix (1-9999 followed by `-`).
-   - Example valid filename: `1-audio.wav`.
+**Input Directory:**
 
-2. **`merge_audio_in_subfolders(input_folder, output_folder)`**:
-   - Walks through the input folder and merges valid audio files in each subfolder.
-   - Saves the merged output in a subfolder under the specified output folder.
+```
+/path/to/input/folder
+    ├── subfolder1
+    │   ├── 1-file1.wav
+    │   ├── 2-file2.mp3
+    │   └── invalid_file.wav
+    ├── subfolder2
+        ├── 1-file1.ogg
+        └── 2-file2.flac
+```
 
-3. **`ensure_directory_exists(file_path)`**:
-   - Ensures the directory for the output file exists before trying to write the merged audio file.
+**Output Directory:**
 
-## Dependencies
+```
+/path/to/output/folder
+    ├── subfolder1
+    │   └── merged_audio.wav
+    └── subfolder2
+        └── merged_audio.wav
+```
 
-- [pydub](https://pydub.com/): A simple and easy-to-use library for audio file manipulation.
-- FFmpeg: Required for handling audio file formats.
-
-## Installation
-
-1. Clone or download this repository to your local machine.
-
-2. Install the required Python dependencies:
-
-   ```bash
-   pip install pydub
-   ```
-
-3. Install FFmpeg on your system, following the instructions [here](https://ffmpeg.org/download.html).
-
+Invalid or problematic files (e.g., `invalid_file.wav`) will be skipped, and their content will not be merged.
