@@ -1,62 +1,71 @@
-# Efficient Audio Processing Script
+# fapMixPlus
 
-This script enables the structured processing of audio files, including downloading from a URL, converting to WAV format, normalizing loudness, slicing, and transcribing audio content.
+This project provides an end-to-end audio processing pipeline to automate the extraction, separation, slicing, transcription, and renaming of audio files. The resulting files are saved in a structured output directory with cleaned filenames.
+
+## Features
+
+- **Download Audio**: Fetches audio files from a URL or uses local input files.
+- **Convert to WAV**: Converts audio files to WAV format.
+- **Separate Vocals**: Isolates vocal tracks from the WAV files.
+- **Slice Audio**: Segments the separated vocal track for transcription.
+- **Transcribe**: Generates transcriptions from audio slices.
+- **Sanitize and Rename Files**: Creates sanitized filenames with a numerical prefix, limited to 128 characters.
 
 ## Prerequisites
 
-Ensure you have the following dependencies installed:
-
 - Python 3.x
-- `yt-dlp`
-- `ffmpeg`
-- `shutil`
-
-Install the required Python packages using `pip`:
-```bash
-pip install yt-dlp
+- Install required Python packages:
+  ```bash
+  pip install yt-dlp
+  ```
+- `fap` (Fish Audio Preprocessor) should be installed and available in the PATH.
 
 ## Usage
-Run the script with the following options:
 
-Download Audio from URL and Process
-```bash
-python fapMixPlus0x10.py --url <audio_url> --output_dir <output_directory>
+### Command-line Arguments
 
-## Process Existing Audio Directory
-```bash
-python fapMixPlus0x10.py <input_directory> --output_dir <output_directory>
+| Argument        | Description                                                          |
+|-----------------|----------------------------------------------------------------------|
+| `--url`         | URL of the audio source (YouTube or other supported link).           |
+| `--output_dir`  | Directory for saving all outputs. Default is `output/`.              |
+| `input_dir`     | Path to a local directory of input files (optional if `--url` used). |
 
-## Arguments
---url: URL to download audio from.
-
---output_dir: Directory for storing output files (default: "output").
-
-input_directory: Directory of input files if no URL is provided.
-
-## Steps
-* Audio Download: Downloads audio from the specified URL (if provided) and saves it in the specified download directory.
-
-* WAV Conversion: Converts audio files to WAV format.
-
-* Loudness Normalization: Normalizes the loudness of audio files.
-
-* Audio Slicing: Slices audio files into smaller segments.
-
-* Transcription: Transcribes the audio files and renames them based on the first few words of the transcription.
-
-## Example
-To download and process audio from a URL:
+### Example Command
 
 ```bash
-python fapMixPlus0x10.py --url https://example.com/audio --output_dir /path/to/output
+python fapMixPlus.py --url https://youtu.be/example_video --output_dir my_output
+```
 
-To process audio from an existing directory:
+This command will download the audio from the URL, process it, and save the results in the `my_output` folder.
 
-```bash
-python fapMixPlus0x10.py /path/to/input --output_dir /path/to/output
+### Output Structure
 
-## Logging
-The script provides detailed logging for each stage of the process, including errors and progress updates. Logs are displayed in the console for easy monitoring.
+The output directory will contain a timestamped folder with the following structure:
 
-## Notes
-Ensure the ffmpeg binary is accessible in your system PATH for the script to run successfully.
+```
+output_<timestamp>/
+├── wav_conversion/            # WAV-converted audio files
+├── separation_output/         # Separated vocal track files
+├── slicing_output/            # Sliced segments from separated audio
+├── final_output/              # Final, sanitized, and renamed .wav and .lab files
+```
+
+## Functionality Details
+
+1. **Download Audio**: Downloads audio from a URL, saving it in `.m4a` format.
+2. **WAV Conversion**: Converts audio to WAV using `fap to-wav`.
+3. **Separation**: Separates vocals from the WAV files using `fap separate`.
+4. **Slicing**: Segments the separated vocal track into smaller audio slices.
+5. **Transcription**: Uses `fap transcribe` to transcribe each slice.
+6. **Sanitization and Renaming**:
+   - Extracts the first 10 words from each `.lab` file.
+   - Replaces spaces with underscores, removes special characters, and limits to 128 characters.
+   - Applies a numerical prefix if no valid content is in the `.lab` file.
+
+## Example File Names in Final Output
+
+Final output files in `final_output` will be structured like:
+- `0001_Hello_this_is_a_sample_transcription.wav`
+- `0001_Hello_this_is_a_sample_transcription.lab`
+
+Files without usable `.lab` content will retain the numerical prefix, e.g., `0002.wav` and `0002.lab`.
