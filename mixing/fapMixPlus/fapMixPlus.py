@@ -1,12 +1,10 @@
 
-import argparse
 import os
 import sys
 import subprocess
-import yt_dlp
 import shutil
-import logging
 from datetime import datetime
+import logging
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -20,8 +18,10 @@ def download_audio(url, download_dir):
         'quiet': True
     }
     try:
+        import yt_dlp
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            result = ydl.extract_info(url, download=True)
+            title = result.get('title', '')
     except Exception as e:
         logging.error(f"Error downloading audio: {e}")
         sys.exit(1)
@@ -30,7 +30,7 @@ def download_audio(url, download_dir):
         logging.error("Downloaded file is empty.")
         sys.exit(1)
 
-    return download_dir
+    return download_dir, title  # Return the directory and the title
 
 def run_command(command, stage_name):
     """Run a subprocess command and log progress"""
@@ -66,91 +66,111 @@ def transcribe(input_dir):
     run_command(['fap', 'transcribe', '--lang', 'en', '--recursive', input_dir], "Transcription")
     logging.info(f"Transcription completed, files are available in {input_dir}")
 
-def sanitize_filename(words, prefix, max_length=128):
-    """Sanitize filename by removing unwanted characters, replacing spaces with underscores, and limiting length"""
-    sanitized_words = "_".join(words.split())[:max_length]  # Replace spaces with underscores and limit length
-    sanitized = "".join(char if char.isalnum() or char == "_" else "" for char in sanitized_words)
-    return f"{prefix}_{sanitized[:max_length]}"
+def sanitize_filename(name, max_length=128):
+    """Sanitize filename by removing unwanted characters and limiting length"""
+    sanitized = "".join(char if char.isalnum() or char == "_" else "_" for char in name)[:max_length]
+    return sanitized
 
-def rename_and_copy_transcription_files(transcription_dir, final_output_dir):
-    """Rename transcription files based on the content in their corresponding .lab files and copy to final output"""
+def rename_and_copy_transcription_files(slicing_output_subdir, final_output_dir):
+    """Rename transcription files based on .lab file content and copy to final output"""
     os.makedirs(final_output_dir, exist_ok=True)
-    for i, file in enumerate(sorted(os.listdir(transcription_dir))):
+    for i, file in enumerate(sorted(os.listdir(slicing_output_subdir))):
         if file.endswith(".wav"):
-            lab_file_path = os.path.join(transcription_dir, file.replace(".wav", ".lab"))
+            lab_file_path = os.path.join(slicing_output_subdir, file.replace(".wav", ".lab"))
             prefix = f"{i:04d}"
 
+            # Check if the corresponding .lab file exists
             if os.path.exists(lab_file_path):
                 with open(lab_file_path, 'r') as lab_file:
                     transcription_text = lab_file.readline().strip()
-                words = "_".join(transcription_text.split()[:10]) if transcription_text else ""  # First 10 words
+                words = "_".join(transcription_text.split()[:10]) if transcription_text else ""
 
-                # Sanitize and limit filename
-                dest_file_name = sanitize_filename(words, prefix) if words else prefix
+                # Sanitize and create final filenames
+                dest_file_name = sanitize_filename(words, 128) if words else prefix
                 dest_wav_path = os.path.join(final_output_dir, dest_file_name + ".wav")
                 dest_lab_path = os.path.join(final_output_dir, dest_file_name + ".lab")
 
-                # Copy and rename both .wav and .lab files
-                shutil.copy(os.path.join(transcription_dir, file), dest_wav_path)
+                # Copy and rename both .wav and .lab files to final_output
+                shutil.copy(os.path.join(slicing_output_subdir, file), dest_wav_path)
                 shutil.copy(lab_file_path, dest_lab_path)
                 logging.info(f"Copied and renamed {file} to {dest_file_name}.wav and {lab_file_path} to {dest_file_name}.lab")
             else:
-                logging.warning(f"Matching .lab file for {file} not found.")
+                logging.warning(f"Matching .lab file for {file} not found in {slicing_output_subdir}. Skipping.")
+
+def get_oldest_file_date(input_dir):
+    """Get date of the oldest file in the input directory in DDMonthYYYY format"""
+    files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+    if files:
+        oldest_file = min(files, key=os.path.getmtime)
+        file_time = datetime.fromtimestamp(os.path.getmtime(oldest_file))
+    else:
+        file_time = datetime.now()
+    return file_time.strftime("%d%B%Y")
+
+def zip_final_output(final_output_dir, output_dir, zip_name):
+    """Zip the final_output directory with the specified zip name"""
+    zip_path = os.path.join(output_dir, f"{zip_name}.zip")
+    shutil.make_archive(zip_path.replace(".zip", ""), 'zip', final_output_dir)
+    logging.info(f"Final output zipped as {zip_path}")
+    return zip_path
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="Streamlined audio processing script.")
     parser.add_argument('--url', type=str, help='URL to download audio from')
     parser.add_argument('--output_dir', type=str, default="output", help='Directory for storing output files')
     parser.add_argument('input_dir', nargs='?', help='Directory of input files if no URL is provided')
     args = parser.parse_args()
 
-    # Create main output directory with timestamp
+    # Set up output directories
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     main_output_dir = os.path.join(args.output_dir, f"output_{timestamp}")
     os.makedirs(main_output_dir, exist_ok=True)
 
     # Step 1: Acquire Input Audio
     input_dir = args.input_dir
+    identifier = ""  # This will hold our identifier suffix
     if args.url:
-        input_dir = download_audio(args.url, main_output_dir)
+        input_dir, identifier = download_audio(args.url, main_output_dir)
+    elif args.output_dir:
+        identifier = args.output_dir  # Use output directory name if provided
+
+    identifier = sanitize_filename(identifier, 50)  # Sanitize and limit identifier length
 
     if not input_dir or not os.path.isdir(input_dir):
         logging.error("No valid input directory provided.")
         sys.exit(1)
 
-    # Step 2: WAV Conversion
+    # Step 2-5: Process Audio
     wav_output_dir = os.path.join(main_output_dir, "wav_conversion")
-    os.makedirs(wav_output_dir, exist_ok=True)
-    wav_conversion(input_dir, wav_output_dir)
-
-    # Step 3: Separation
     separation_output_dir = os.path.join(main_output_dir, "separation_output")
-    os.makedirs(separation_output_dir, exist_ok=True)
-    separation(wav_output_dir, separation_output_dir)
-
-    # Step 4: Slicing
     slicing_output_dir = os.path.join(main_output_dir, "slicing_output")
-    os.makedirs(slicing_output_dir, exist_ok=True)
-    slicing(separation_output_dir, slicing_output_dir)
+    final_output_dir = os.path.join(main_output_dir, "final_output")
+    os.makedirs(final_output_dir, exist_ok=True)
 
-    # Locate the actual subfolder for transcription
-    slicing_subfolder = None
+    wav_conversion(input_dir, wav_output_dir)
+    separation(wav_output_dir, separation_output_dir)
+    slicing(separation_output_dir, slicing_output_dir)
+    transcribe(slicing_output_dir)
+
+    # Locate the actual subfolder for slicing output
+    slicing_output_subdir = None
     for subfolder in os.listdir(slicing_output_dir):
         subfolder_path = os.path.join(slicing_output_dir, subfolder)
         if os.path.isdir(subfolder_path):
-            slicing_subfolder = subfolder_path
+            slicing_output_subdir = subfolder_path
             break
 
-    if not slicing_subfolder:
-        logging.error("No subfolder found in slicing output for transcription.")
+    if not slicing_output_subdir:
+        logging.error("No subfolder found in slicing output for renaming and copying to final output.")
         sys.exit(1)
 
-    # Step 5: Transcription
-    transcribe(slicing_subfolder)
+    rename_and_copy_transcription_files(slicing_output_subdir, final_output_dir)
 
-    # Step 6: Rename and Copy Transcription Files
-    final_output_dir = os.path.join(main_output_dir, "final_output")
-    rename_and_copy_transcription_files(slicing_subfolder, final_output_dir)
+    # Step 6: Zip the final output with date + identifier format
+    zip_date = get_oldest_file_date(input_dir)
+    zip_name = f"{zip_date}-{identifier}" if identifier else zip_date
+    zip_final_output(final_output_dir, main_output_dir, zip_name)
 
 if __name__ == "__main__":
     main()
