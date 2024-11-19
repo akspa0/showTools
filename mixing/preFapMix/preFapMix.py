@@ -54,6 +54,7 @@ def transcribe_directory(input_dir, num_workers=2):
     run_command(['fap', 'transcribe', '--lang', 'en', '--recursive', input_dir, '--num-workers', str(num_workers)], "Transcription")
 
 def rename_and_copy_sliced_files(input_dir, target_dir, side):
+    MAX_FILENAME_LENGTH = 128  # Maximum allowed filename length
     for root, dirs, files in os.walk(input_dir):
         rel_path = os.path.relpath(root, input_dir)
         audio_target_dir = os.path.join(target_dir, side, rel_path)
@@ -72,6 +73,24 @@ def rename_and_copy_sliced_files(input_dir, target_dir, side):
                     new_filename = f"{base_name}_{text_excerpt}.wav"
                 else:
                     new_filename = filename
+
+                # Ensure the new filename does not exceed the maximum length
+                if len(new_filename) > MAX_FILENAME_LENGTH:
+                    # Calculate how many characters to truncate
+                    excess_length = len(new_filename) - MAX_FILENAME_LENGTH
+                    # Truncate the text excerpt first
+                    if '_' in new_filename:
+                        base_name, text_excerpt_with_ext = new_filename.rsplit('_', 1)
+                        text_excerpt, ext = text_excerpt_with_ext.rsplit('.', 1)
+                        if len(text_excerpt) > excess_length:
+                            text_excerpt = text_excerpt[:len(text_excerpt) - excess_length]
+                        else:
+                            text_excerpt = text_excerpt[:1]  # Ensure at least one character remains
+                        new_filename = f"{base_name}_{text_excerpt}.{ext}"
+                    else:
+                        # If no underscore, truncate the base name
+                        base_name = base_name[:len(base_name) - excess_length]
+                        new_filename = f"{base_name}.wav"
 
                 target_path = os.path.join(audio_target_dir, new_filename)
                 shutil.copy2(source_path, target_path)
@@ -100,6 +119,8 @@ def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe
 
     for filename in os.listdir(input_dir):
         file_path = os.path.join(input_dir, filename)
+        if not os.path.isfile(file_path):
+            continue  # Skip directories
         file_timestamp = os.path.getmtime(file_path)
         logging.info(f"Processing file: {filename}")
         
@@ -144,7 +165,6 @@ def identify_channel_pairs(normalized_dir):
             pairs.setdefault(base_key, {})['right'] = os.path.join(normalized_dir, filename)
 
     return pairs
-
 
 def process_channel_pairs(pairs, left_dir, right_dir, stereo_dir, append_tones):
     for base_name, channels in pairs.items():
