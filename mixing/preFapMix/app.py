@@ -33,7 +33,7 @@ def create_output_dir(base_dir="output"):
 
 # Define the Gradio interface
 with gr.Blocks() as app:
-    gr.Markdown("# Audio Processing Tool")
+    gr.Markdown("# preFapMix (gradio)")
     gr.Markdown("Upload or specify an input directory, set options, and process your audio files interactively.")
 
     input_dir = gr.Textbox(label="Input Directory", placeholder="Path to input audio files", lines=1)
