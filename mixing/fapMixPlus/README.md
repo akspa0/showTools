@@ -1,111 +1,127 @@
-# fapMixPlus
+## fapMixPlus (WebUI)
 
-This project provides an end-to-end audio processing pipeline to automate the extraction, separation, slicing, transcription, and renaming of audio files. The resulting files are saved in a structured output directory with cleaned filenames and optional ZIP archives for easier distribution or storage.
+### Overview
+The `fapMixPlus (WebUI)` project combines the power of the `fapMixPlus.py` audio processing script with an intuitive Gradio-based user interface. This tool automates and streamlines audio downloading, conversion, separation, slicing, transcription, and file organization. Whether you’re working with uploaded files or audio from a URL, this application provides an efficient and user-friendly way to process audio files.
 
-## Features
+---
 
-- **Download Audio**: Fetches audio files from a URL or uses local input files.
-- **Convert to WAV**: Converts audio files to WAV format.
-- **Separate Vocals**: Isolates vocal tracks from the WAV files.
-- **Slice Audio**: Segments the separated vocal track for transcription.
-- **Transcribe**: Generates transcriptions from audio slices.
-- **Sanitize and Rename Files**: Creates sanitized filenames with a numerical prefix, limited to 128 characters.
-- **Generate ZIP Files**: Compresses processed files into ZIP archives for easy storage and distribution.
+### Features
+- **Audio Downloading**: Fetch audio from URLs (e.g., YouTube).
+- **File Upload Support**: Process locally stored audio files.
+- **WAV Conversion**: Convert input audio to the WAV format.
+- **Audio Separation**: Isolate vocal tracks from WAV files.
+- **Slicing and Transcription**: Segment audio and generate transcriptions for each slice.
+- **File Renaming and Organization**: Sanitize filenames and structure output directories.
+- **ZIP File Generation**: Compress final results for easy distribution.
+- **Real-Time Logs and Controls**: Monitor progress and manage processes through a web interface.
 
-## Prerequisites
+---
 
-- **Python 3.x**
-- Install required Python packages:
-  ```bash
-  pip install yt-dlp
-  ```
-- **Fish Audio Preprocessor (`fap`)** should be installed and available in the PATH.
-
-### Installing the Fish Audio Preprocessor (`fap`)
-
-1. Clone the [Fish Audio Preprocessor repository](https://github.com/fishaudio/audio-preprocess):
+### Prerequisites
+1. **Python 3.7+**
+2. Install Python dependencies:
    ```bash
-   git clone https://github.com/fishaudio/audio-preprocess.git
+   pip install -r requirements.txt
    ```
+3. **Fish Audio Preprocessor (`fap`)**:
+   - Clone the [Fish Audio Preprocessor repository](https://github.com/fishaudio/audio-preprocess):
+     ```bash
+     git clone https://github.com/fishaudio/audio-preprocess.git
+     ```
+   - Navigate to the repository and install:
+     ```bash
+     cd audio-preprocess
+     pip install -e .
+     ```
+   - Verify the installation:
+     ```bash
+     fap --version
+     ```
 
-2. Navigate to the repository directory:
+---
+
+### Usage
+
+#### Running the WebUI
+1. Clone the repository:
    ```bash
-   cd audio-preprocess
+   git clone https://github.com/your-repo/fapMixPlus-webui.git
+   cd fapMixPlus-webui
    ```
-
-3. Install the package from the cloned repository:
+2. Start the Gradio-based application:
    ```bash
-   pip install -e .
+   python app.py
    ```
+3. Access the WebUI in your browser (URL is provided in the console).
 
-This step installs `fap` and makes it accessible as a command-line tool, which is essential for `fapMixPlus.py` to function correctly.
+#### WebUI Options
+- **Audio URL**: Enter a YouTube or supported audio link to download and process.
+- **Upload Files**: Upload audio files (`.wav`, `.mp3`) for local processing.
+- **Output Directory**: Specify a directory for storing output files.
+- **Buttons**:
+  - `Process Audio`: Start the audio processing.
+  - `Cancel Process`: Stop any running process.
+  - `Download ZIP`: Download the latest `.zip` archive.
+  - `Refresh Logs`: View updated logs in real time.
 
-4. Verify the installation by checking the version:
-   ```bash
-   fap --version
-   ```
+---
 
-## Usage
-
-### Command-line Arguments
-
-| Argument        | Description                                                          |
-|-----------------|----------------------------------------------------------------------|
-| `--url`         | URL of the audio source (YouTube or other supported link).           |
-| `--output_dir`  | Directory for saving all outputs. Default is `output/`.              |
-| `input_dir`     | Path to a local directory of input files (optional if `--url` used). |
-
-### Example Command
-
+### CLI Usage (Optional)
+You can also use `fapMixPlus.py` directly as a standalone command-line tool:
 ```bash
 python fapMixPlus.py --url https://youtu.be/example_video --output_dir my_output
 ```
 
-This command will download the audio from the URL, process it, and save the results in the `my_output` folder.
+---
 
 ### Output Structure
-
-The output directory will contain a timestamped folder with the following structure:
-
+Processed files are organized into structured directories:
 ```
 output_<timestamp>/
 ├── wav_conversion/            # WAV-converted audio files
 ├── separation_output/         # Separated vocal track files
-├── slicing_output/            # Sliced segments from separated audio
-├── final_output/              # Final, sanitized, and renamed .wav and .lab files
-├── zip_files/                 # Compressed ZIP archives of processed files
+├── slicing_output/            # Sliced audio segments
+├── final_output/              # Renamed and sanitized WAV and .lab files
+└── zip_files/                 # Compressed archives of final output
 ```
 
-### ZIP File Details
+---
 
-In addition to organizing output files by processing stages, `fapMixPlus` can generate ZIP archives for convenience. Each ZIP file in the `zip_files/` directory will contain a set of processed audio and transcription files, with names based on their content and timestamp. The ZIP filenames will follow this format:
+### Example Workflow
+1. **Audio Input**: Upload files or provide a URL.
+2. **Processing Stages**:
+   - Convert audio to WAV format.
+   - Separate vocals from the WAV files.
+   - Slice and transcribe vocal tracks.
+   - Rename and organize transcription files.
+3. **Output**:
+   - Access the organized files in `final_output/`.
+   - Download the `.zip` archive from the WebUI or `zip_files/`.
 
-```
-output_<timestamp>.zip
-```
+---
 
-Each ZIP file will include:
-- The WAV and `.lab` files from `final_output/`, with sanitized filenames.
-- These ZIP files are ideal for transferring or archiving processed audio.
+### Notes
+- Ensure the `fapMixPlus.py` script and required dependencies (`fap`) are properly installed.
+- Final `.wav` and `.lab` filenames are sanitized to include the transcription content or a numerical prefix.
 
-## Functionality Details
+---
 
-1. **Download Audio**: Downloads audio from a URL, saving it in `.m4a` format.
-2. **WAV Conversion**: Converts audio to WAV using `fap to-wav`.
-3. **Separation**: Separates vocals from the WAV files using `fap separate`.
-4. **Slicing**: Segments the separated vocal track into smaller audio slices.
-5. **Transcription**: Uses `fap transcribe` to transcribe each slice.
-6. **Sanitization and Renaming**:
-   - Extracts the first 10 words from each `.lab` file.
-   - Replaces spaces with underscores, removes special characters, and limits to 128 characters.
-   - Applies a numerical prefix if no valid content is in the `.lab` file.
-7. **ZIP File Creation**:
-   - After processing, the final `.wav` and `.lab` files are compressed into ZIP archives in `zip_files/` for each session, making it easy to organize or share the output.
+### Example Final Output Filenames
+- `0001_Hello_this_is_a_sample.wav`
+- `0001_Hello_this_is_a_sample.lab`
 
-## Example File Names in Final Output
+Files without valid transcription will retain only the numerical prefix:
+- `0002.wav`
+- `0002.lab`
 
-Final output files in `final_output` will be structured like:
-- `0001_Hello_this_is_a_sample_transcription.wav`
-- `0001_Hello_this_is_a_sample_transcription.lab`
+---
 
-Files without usable `.lab` content will retain the numerical prefix, e.g., `0002.wav` and `0002.lab`.
+### License
+This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+---
+
+### Acknowledgments
+- Gradio for the interactive web interface.
+- `fapMixPlus.py` for backend audio processing.
+- `yt-dlp` for YouTube audio downloading capabilities.
