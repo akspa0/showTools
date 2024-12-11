@@ -3,7 +3,8 @@ import re
 import logging
 import argparse
 from pydub import AudioSegment
-from pydub.effects import normalize
+import numpy as np
+import pyloudnorm as pyln
 import subprocess
 from datetime import datetime
 import shutil
@@ -19,9 +20,24 @@ def apply_soft_limiter(audio, target_level=-6.0):
         return audio.apply_gain(gain_reduction)
     return audio
 
-def loudness_normalization(audio):
-    logging.info("Applying loudness normalization...")
-    return normalize(audio)
+def measure_and_normalize(audio, target_lufs=-14.0):
+    logging.info("Measuring LUFS and normalizing to target...")
+
+    # Convert audio to raw data for pyloudnorm
+    raw_audio = np.array(audio.get_array_of_samples(), dtype=np.float32)
+    raw_audio /= np.iinfo(audio.array_type).max  # Normalize to -1.0 to 1.0 range
+    meter = pyln.Meter(audio.frame_rate)  # Create LUFS meter
+
+    # Measure loudness
+    loudness = meter.integrated_loudness(raw_audio)
+    logging.info(f"Current loudness: {loudness:.2f} LUFS")
+
+    # Calculate required gain for normalization
+    gain = target_lufs - loudness
+    normalized_audio = audio.apply_gain(gain)
+
+    logging.info(f"Applied gain: {gain:.2f} dB")
+    return normalized_audio
 
 def sanitize_text(text):
     sanitized = re.sub(r'[^\w\s]', '', text)
@@ -101,7 +117,7 @@ def rename_and_copy_sliced_files(input_dir, target_dir, side):
                 shutil.copy2(source_path, target_path)
                 logging.info(f".lab file copied to {target_path}")
 
-def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe_right=False, append_tones=False, normalize_audio=False, num_workers=2):
+def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe_right=False, append_tones=False, normalize_audio=False, target_lufs=-14.0, num_workers=2):
     logging.info("Starting audio processing")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = os.path.join(output_dir, f"run_{timestamp}")
@@ -127,7 +143,7 @@ def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe
         try:
             audio = AudioSegment.from_file(file_path)
             limited_audio = apply_soft_limiter(audio)
-            normalized_audio = loudness_normalization(limited_audio) if normalize_audio else limited_audio
+            normalized_audio = measure_and_normalize(limited_audio, target_lufs) if normalize_audio else limited_audio
             
             normalized_path = os.path.join(normalized_dir, filename)
             normalized_audio.export(normalized_path, format="wav")
@@ -204,7 +220,7 @@ def mix_to_stereo(left_path, right_path, stereo_dir, base_name, append_tones):
         logging.error(f"Error mixing stereo channels for {base_name}: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process audio files with soft limiting, optional normalization, and transcription.")
+    parser = argparse.ArgumentParser(description="Process audio files with soft limiting, LUFS normalization, and optional transcription.")
     parser.add_argument("--input-dir", required=True, help="Directory containing input audio files")
     parser.add_argument("--output-dir", required=True, help="Directory where output will be saved")
     parser.add_argument("--transcribe", action="store_true", help="Enable transcription for both left and right channels")
@@ -212,6 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--transcribe_right", action="store_true", help="Enable transcription for right channel only")
     parser.add_argument("--tones", action="store_true", help="Append 'tones.wav' to the end of stereo output files")
     parser.add_argument("--normalize", action="store_true", help="Enable loudness normalization")
+    parser.add_argument("--target-lufs", type=float, default=-14.0, help="Target loudness in LUFS (default: -14)")
     parser.add_argument("--num-workers", type=int, default=2, help="Number of workers for transcription (default: 2)")
 
     args = parser.parse_args()
@@ -226,5 +243,6 @@ if __name__ == "__main__":
         transcribe_right=transcribe_right,
         append_tones=args.tones,
         normalize_audio=args.normalize,
+        target_lufs=args.target_lufs,
         num_workers=args.num_workers
     )
