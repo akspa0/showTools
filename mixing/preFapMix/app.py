@@ -2,11 +2,11 @@ import gradio as gr
 import os
 from datetime import datetime
 import logging
-from preFapMix import process_audio_files  # Assuming your script is saved as app_script.py
+from preFapMix import process_audio_files
 
 logging.basicConfig(level=logging.INFO)
 
-def process_audio(input_dir, output_dir, transcribe, transcribe_left, transcribe_right, append_tones, normalize, num_workers):
+def process_audio(input_dir, output_dir, transcribe, transcribe_left, transcribe_right, append_tones, normalize, target_lufs, num_workers):
     try:
         transcribe_left_flag = transcribe or transcribe_left
         transcribe_right_flag = transcribe or transcribe_right
@@ -19,6 +19,7 @@ def process_audio(input_dir, output_dir, transcribe, transcribe_left, transcribe
             transcribe_right=transcribe_right_flag,
             append_tones=append_tones,
             normalize_audio=normalize,
+            target_lufs=target_lufs,
             num_workers=num_workers
         )
 
@@ -33,7 +34,7 @@ def create_output_dir(base_dir="output"):
 
 # Define the Gradio interface
 with gr.Blocks() as app:
-    gr.Markdown("# preFapMix (gradio)")
+    gr.Markdown("# Audio Processing App")
     gr.Markdown("Upload or specify an input directory, set options, and process your audio files interactively.")
 
     input_dir = gr.Textbox(label="Input Directory", placeholder="Path to input audio files", lines=1)
@@ -43,6 +44,7 @@ with gr.Blocks() as app:
     transcribe_right = gr.Checkbox(label="Transcribe Right Channel Only", value=False)
     append_tones = gr.Checkbox(label="Append Tones to Stereo Outputs", value=False)
     normalize = gr.Checkbox(label="Enable Loudness Normalization", value=False)
+    target_lufs = gr.Slider(label="Target LUFS", minimum=-30, maximum=-10, step=0.5, value=-14.0)
     num_workers = gr.Slider(label="Number of Workers for Transcription", minimum=1, maximum=8, step=1, value=2)
 
     process_button = gr.Button("Start Processing")
@@ -51,7 +53,7 @@ with gr.Blocks() as app:
     process_button.click(
         process_audio,
         inputs=[
-            input_dir, output_dir, transcribe, transcribe_left, transcribe_right, append_tones, normalize, num_workers
+            input_dir, output_dir, transcribe, transcribe_left, transcribe_right, append_tones, normalize, target_lufs, num_workers
         ],
         outputs=result
     )
