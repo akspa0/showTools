@@ -128,15 +128,21 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         zip_results(file_output_dir, processed_file)
 
 def main():
-    parser = argparse.ArgumentParser(description="Streamlined audio processing script.")
-    parser.add_argument('--input_dir', type=str, help='Directory containing input audio files')
-    parser.add_argument('--input_file', type=str, help='Single audio file for processing')
-    parser.add_argument('--url', type=str, help='URL to download audio from')
-    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output files')
-    parser.add_argument('--model', type=str, default="turbo", help='Whisper model to use (default: turbo)')
-    parser.add_argument('--num_speakers', type=int, default=2, help='Expected number of speakers in the audio')
-    parser.add_argument('--enable_vocal_separation', action='store_true', help='Enable vocal separation using Demucs')
+    parser = argparse.ArgumentParser(
+        description="Streamlined audio processing script for transcription and diarization."
+    )
+    parser.add_argument('--input_dir', type=str, help='Directory containing input audio files.')
+    parser.add_argument('--input_file', type=str, help='Single audio file for processing.')
+    parser.add_argument('--url', type=str, help='URL to download audio from.')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output files.')
+    parser.add_argument('--model', type=str, default="turbo", help='Whisper model to use (default: turbo).')
+    parser.add_argument('--num_speakers', type=int, default=2, help='Number of speakers for diarization (default: 2).')
+    parser.add_argument('--enable_vocal_separation', action='store_true', help='Enable vocal separation using Demucs.')
     args = parser.parse_args()
+
+    if not any([args.input_dir, args.input_file, args.url]):
+        parser.print_help()
+        sys.exit(1)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     main_output_dir = os.path.join(args.output_dir, f"output_{timestamp}")
@@ -149,6 +155,7 @@ def main():
 
     if not input_path or not os.path.exists(input_path):
         logging.error("No valid input path provided.")
+        parser.print_help()
         sys.exit(1)
 
     process_audio(
@@ -156,5 +163,8 @@ def main():
         main_output_dir,
         args.model,
         args.enable_vocal_separation,
-        args.num_speakers  # Pass num_speakers dynamically
+        args.num_speakers
     )
+
+if __name__ == "__main__":
+    main()
