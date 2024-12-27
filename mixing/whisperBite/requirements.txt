@@ -6,3 +6,4 @@ termcolor
 ffmpeg-python
 yt-dlp
 demucs
+gradio
