@@ -103,26 +103,36 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         try:
             normalized_file = convert_and_normalize_audio(audio_file, base_output_dir)
             if enable_vocal_separation:
+                logging.info("Performing vocal separation.")
                 vocals_file = separate_vocals_with_demucs(normalized_file, base_output_dir)
-                processed_files.append((vocals_file, base_output_dir))
+                if os.path.exists(vocals_file):
+                    processed_files.append((vocals_file, base_output_dir))
+                else:
+                    logging.error(f"Vocal-separated file {vocals_file} not found.")
+                    continue
             else:
                 processed_files.append((normalized_file, base_output_dir))
         except Exception as e:
             logging.error(f"Error processing {audio_file}: {e}")
+            continue
 
     model = load_model(model_name)
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
     pipeline.to(device)
 
     for processed_file, file_output_dir in processed_files:
-        speaker_output_dir = os.path.join(file_output_dir, "speakers")
-        diarization = pipeline(processed_file)
-        speaker_files = slice_audio_by_speaker(processed_file, diarization, speaker_output_dir)
+        try:
+            speaker_output_dir = os.path.join(file_output_dir, "speakers")
+            diarization = pipeline(processed_file)
+            speaker_files = slice_audio_by_speaker(processed_file, diarization, speaker_output_dir)
 
-        for speaker, segments in speaker_files.items():
-            speaker_transcription_dir = os.path.join(file_output_dir, f"Speaker_{speaker}_transcriptions")
-            os.makedirs(speaker_transcription_dir, exist_ok=True)
-            transcribe_with_whisper(model, segments, speaker_transcription_dir)
+            for speaker, segments in speaker_files.items():
+                speaker_transcription_dir = os.path.join(file_output_dir, f"Speaker_{speaker}_transcriptions")
+                os.makedirs(speaker_transcription_dir, exist_ok=True)
+                transcribe_with_whisper(model, segments, speaker_transcription_dir)
+        except Exception as e:
+            logging.error(f"Error during diarization or transcription for {processed_file}: {e}")
+            continue
 
         # Zip the results for the processed file
         zip_results(file_output_dir, processed_file)
