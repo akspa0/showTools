@@ -28,27 +28,35 @@ def download_audio(url, output_dir):
         raise
 
 def zip_results(output_dir, input_filename):
-    """Zip the results into a single zip file containing only transcribed MP3 files."""
+    """Zip the results into a single zip file containing only speaker transcriptions and their audio files."""
     base_name = os.path.splitext(os.path.basename(input_filename))[0]
     zip_filename = os.path.join(output_dir, f"{base_name}_results.zip")
 
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(output_dir):
+        for root, dirs, files in os.walk(output_dir):
+            if "normalized" in root or "demucs" in root:
+                continue  # Skip normalized and demucs directories
+
             for file in files:
-                if file.endswith(".wav"):
+                if file.endswith(".txt") or file.endswith(".wav"):
                     full_path = os.path.join(root, file)
 
                     # Convert WAV to MP3 before adding to the zip
-                    mp3_file = os.path.splitext(full_path)[0] + ".mp3"
-                    audio = AudioSegment.from_file(full_path)
-                    audio.export(mp3_file, format="mp3")
+                    if file.endswith(".wav"):
+                        mp3_file = os.path.splitext(full_path)[0] + ".mp3"
+                        audio = AudioSegment.from_file(full_path)
+                        audio.export(mp3_file, format="mp3")
 
-                    # Add the MP3 to the zip
-                    relative_path = os.path.relpath(mp3_file, output_dir)
-                    zipf.write(mp3_file, relative_path)
+                        # Add the MP3 to the zip
+                        relative_path = os.path.relpath(mp3_file, output_dir)
+                        zipf.write(mp3_file, relative_path)
 
-                    # Clean up the MP3 file after adding it to the zip
-                    os.remove(mp3_file)
+                        # Clean up the MP3 file after adding it to the zip
+                        os.remove(mp3_file)
+                    else:
+                        # Add other files (e.g., .txt) directly
+                        relative_path = os.path.relpath(full_path, output_dir)
+                        zipf.write(full_path, relative_path)
 
     logging.info(f"Results zipped into: {zip_filename}")
     return zip_filename
