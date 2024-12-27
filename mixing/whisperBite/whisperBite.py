@@ -6,6 +6,7 @@ import logging
 from pydub import AudioSegment
 from whisper import load_model
 from pyannote.audio import Pipeline
+import torch
 import subprocess
 
 # Configure logging
@@ -61,11 +62,21 @@ def separate_vocals_with_demucs(input_audio, output_dir):
             ],
             check=True
         )
-        vocals_file = os.path.join(demucs_output_dir, "vocals.wav")
+        model_dir = os.path.join(demucs_output_dir, "htdemucs")
+        input_base_name = os.path.splitext(os.path.basename(input_audio))[0]
+        vocals_dir = os.path.join(model_dir, input_base_name)
+        vocals_file = os.path.join(vocals_dir, "vocals.wav")
+
+        if not os.path.exists(vocals_file):
+            raise FileNotFoundError(f"Expected vocals file not found at {vocals_file}")
+
         logging.info(f"Vocal separation completed. File saved to {vocals_file}")
         return vocals_file
     except subprocess.CalledProcessError as e:
         logging.error(f"Error during vocal separation: {e}")
+        raise
+    except FileNotFoundError as e:
+        logging.error(f"Vocal separation output missing: {e}")
         raise
 
 def slice_audio_by_speaker(file_path, diarization, speaker_output_dir):
@@ -108,6 +119,9 @@ def transcribe_with_whisper(model, audio_files, output_dir):
 
 def process_audio(input_path, output_dir, model_name, num_speakers, enable_vocal_separation):
     """Unified pipeline for audio processing."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logging.info(f"Using device: {device}")
+
     processed_files = []
     audio_files = [input_path] if os.path.isfile(input_path) else [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith(('.mp3', '.wav', '.m4a'))]
 
