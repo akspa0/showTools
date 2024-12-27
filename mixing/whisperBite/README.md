@@ -1,4 +1,4 @@
-# Audio Processing Tool
+# whisperBite
 
 This tool processes audio files into transcribed soundbites, leveraging OpenAI's Whisper for transcription and pyannote.audio for speaker diarization. It includes features like vocal separation, silence-based slicing, and downloadable audio from URLs.
 
