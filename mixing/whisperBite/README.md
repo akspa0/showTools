@@ -120,4 +120,4 @@ output_dir/
 - Ensure sufficient disk space for intermediate files and results.
 
 ## License
-MIT License
+Creative Commons Attribution-ShareAlike 4.0 
