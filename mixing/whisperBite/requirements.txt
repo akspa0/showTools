@@ -1,6 +1,8 @@
 pydub
-torch
 whisper
 pyannote.audio
+torch
 termcolor
+ffmpeg-python
+yt-dlp
 demucs

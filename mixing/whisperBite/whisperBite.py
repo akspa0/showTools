@@ -3,11 +3,10 @@ import sys
 import argparse
 from datetime import datetime
 import logging
-from pydub import AudioSegment
 from whisper import load_model
 from pyannote.audio import Pipeline
 import torch
-import subprocess
+from utils import sanitize_filename, download_audio, zip_results, convert_and_normalize_audio, default_slicing
 
 # Configure logging
 logging.basicConfig(
@@ -15,37 +14,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
-def sanitize_filename(name, max_length=128):
-    """Sanitize filename by removing unwanted characters and limiting length."""
-    sanitized = "".join(char if char.isalnum() or char == "_" else "_" for char in name)[:max_length]
-    return sanitized
-
-def convert_and_normalize_audio(input_audio, output_dir):
-    """Convert audio to WAV with 44.1kHz, 16-bit and normalize loudness to -14 LUFS."""
-    try:
-        logging.info(f"Processing audio file: {input_audio}")
-        normalized_dir = os.path.join(output_dir, "normalized")
-        os.makedirs(normalized_dir, exist_ok=True)
-
-        audio = AudioSegment.from_file(input_audio)
-
-        # Set sample rate and bit depth
-        audio = audio.set_frame_rate(44100).set_sample_width(2)
-
-        # Normalize loudness to -14 LUFS
-        change_in_dBFS = -14 - audio.dBFS
-        normalized_audio = audio.apply_gain(change_in_dBFS)
-
-        # Export normalized audio
-        base_name = os.path.splitext(os.path.basename(input_audio))[0]
-        output_file = os.path.join(normalized_dir, f"{base_name}_normalized.wav")
-        normalized_audio.export(output_file, format="wav")
-        logging.info(f"Normalized audio saved to {output_file}")
-        return output_file
-    except Exception as e:
-        logging.error(f"Error normalizing {input_audio}: {e}")
-        raise
 
 def separate_vocals_with_demucs(input_audio, output_dir):
     """Separate vocals from an audio file using Demucs."""
@@ -72,15 +40,14 @@ def separate_vocals_with_demucs(input_audio, output_dir):
 
         logging.info(f"Vocal separation completed. File saved to {vocals_file}")
         return vocals_file
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         logging.error(f"Error during vocal separation: {e}")
-        raise
-    except FileNotFoundError as e:
-        logging.error(f"Vocal separation output missing: {e}")
         raise
 
 def slice_audio_by_speaker(file_path, diarization, speaker_output_dir):
     """Slice audio by speakers based on diarization results."""
+    from pydub import AudioSegment
+
     audio = AudioSegment.from_file(file_path)
     os.makedirs(speaker_output_dir, exist_ok=True)
 
@@ -117,54 +84,54 @@ def transcribe_with_whisper(model, audio_files, output_dir):
         os.rename(audio_file, audio_output_file)
         logging.info(f"Transcription saved to {transcription_file} and renamed audio to {audio_output_file}")
 
-def process_audio(input_path, output_dir, model_name, num_speakers, enable_vocal_separation):
+def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers):
     """Unified pipeline for audio processing."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
+    logging.info(f"Expected number of speakers: {num_speakers}")
 
     processed_files = []
-    audio_files = [input_path] if os.path.isfile(input_path) else [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith(('.mp3', '.wav', '.m4a'))]
+    audio_files = [input_path] if os.path.isfile(input_path) else [
+        os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith(('.mp3', '.wav', '.m4a'))
+    ]
 
     for audio_file in audio_files:
-        try:
-            logging.info(f"Starting normalization for {audio_file}")
-            normalized_file = convert_and_normalize_audio(audio_file, output_dir)
-            logging.info(f"Normalization completed for {normalized_file}")
+        logging.info(f"Processing file: {audio_file}")
+        base_output_dir = os.path.join(output_dir, os.path.splitext(os.path.basename(audio_file))[0])
+        os.makedirs(base_output_dir, exist_ok=True)
 
+        try:
+            normalized_file = convert_and_normalize_audio(audio_file, base_output_dir)
             if enable_vocal_separation:
-                logging.info(f"Starting vocal separation for {normalized_file}")
-                vocals_file = separate_vocals_with_demucs(normalized_file, output_dir)
-                processed_files.append(vocals_file)
-                logging.info(f"Vocal separation completed for {vocals_file}")
+                vocals_file = separate_vocals_with_demucs(normalized_file, base_output_dir)
+                processed_files.append((vocals_file, base_output_dir))
             else:
-                processed_files.append(normalized_file)
+                processed_files.append((normalized_file, base_output_dir))
         except Exception as e:
             logging.error(f"Error processing {audio_file}: {e}")
 
-    logging.info("Audio processing completed.")
-
     model = load_model(model_name)
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
+    pipeline.to(device)
 
-    for processed_file in processed_files:
-        logging.info(f"Starting diarization for {processed_file}")
-        speaker_output_dir = os.path.join(output_dir, "speakers")
+    for processed_file, file_output_dir in processed_files:
+        speaker_output_dir = os.path.join(file_output_dir, "speakers")
         diarization = pipeline(processed_file)
-        logging.info(f"Diarization completed for {processed_file}")
-
         speaker_files = slice_audio_by_speaker(processed_file, diarization, speaker_output_dir)
 
         for speaker, segments in speaker_files.items():
-            speaker_transcription_dir = os.path.join(output_dir, f"Speaker_{speaker}_transcriptions")
+            speaker_transcription_dir = os.path.join(file_output_dir, f"Speaker_{speaker}_transcriptions")
             os.makedirs(speaker_transcription_dir, exist_ok=True)
-            logging.info(f"Starting transcription for Speaker {speaker}")
             transcribe_with_whisper(model, segments, speaker_transcription_dir)
-            logging.info(f"Transcription completed for Speaker {speaker}")
+
+        # Zip the results for the processed file
+        zip_results(file_output_dir, processed_file)
 
 def main():
     parser = argparse.ArgumentParser(description="Streamlined audio processing script.")
     parser.add_argument('--input_dir', type=str, help='Directory containing input audio files')
     parser.add_argument('--input_file', type=str, help='Single audio file for processing')
+    parser.add_argument('--url', type=str, help='URL to download audio from')
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output files')
     parser.add_argument('--model', type=str, default="turbo", help='Whisper model to use (default: turbo)')
     parser.add_argument('--num_speakers', type=int, default=2, help='Expected number of speakers in the audio')
@@ -175,7 +142,11 @@ def main():
     main_output_dir = os.path.join(args.output_dir, f"output_{timestamp}")
     os.makedirs(main_output_dir, exist_ok=True)
 
-    input_path = args.input_dir if args.input_dir else args.input_file
+    if args.url:
+        input_path = download_audio(args.url, main_output_dir)
+    else:
+        input_path = args.input_dir if args.input_dir else args.input_file
+
     if not input_path or not os.path.exists(input_path):
         logging.error("No valid input path provided.")
         sys.exit(1)
@@ -184,9 +155,6 @@ def main():
         input_path,
         main_output_dir,
         args.model,
-        args.num_speakers,
-        args.enable_vocal_separation
+        args.enable_vocal_separation,
+        args.num_speakers  # Pass num_speakers dynamically
     )
-
-if __name__ == "__main__":
-    main()
