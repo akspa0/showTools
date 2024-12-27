@@ -6,7 +6,7 @@ import logging
 from whisper import load_model
 from pyannote.audio import Pipeline
 import torch
-from utils import sanitize_filename, download_audio, zip_results, convert_and_normalize_audio, default_slicing
+from utils import sanitize_filename, download_audio, zip_results, convert_and_normalize_audio, default_slicing, normalize_audio_ffmpeg
 
 # Configure logging
 logging.basicConfig(
@@ -129,7 +129,14 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
             for speaker, segments in speaker_files.items():
                 speaker_transcription_dir = os.path.join(file_output_dir, f"Speaker_{speaker}_transcriptions")
                 os.makedirs(speaker_transcription_dir, exist_ok=True)
-                transcribe_with_whisper(model, segments, speaker_transcription_dir)
+
+                # Normalize and boost soundbites after slicing
+                normalized_segments = []
+                for segment in segments:
+                    normalized_segment = normalize_audio_ffmpeg(segment)
+                    normalized_segments.append(normalized_segment)
+
+                transcribe_with_whisper(model, normalized_segments, speaker_transcription_dir)
         except Exception as e:
             logging.error(f"Error during diarization or transcription for {processed_file}: {e}")
             continue

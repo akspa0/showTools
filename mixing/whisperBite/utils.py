@@ -1,6 +1,7 @@
 import os
 import logging
 import zipfile
+import subprocess
 from pydub import AudioSegment
 import yt_dlp
 
@@ -34,9 +35,11 @@ def zip_results(output_dir, input_filename):
 
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(output_dir):
-            if "normalized" in root or "demucs" in root:
-                continue  # Skip normalized and demucs directories
+            # Exclude raw 'speakers' folder
+            if "speakers" in root or "normalized" in root or "demucs" in root:
+                continue
 
+            # Include only files from transcriptions folders
             for file in files:
                 if file.endswith(".txt") or file.endswith(".wav"):
                     full_path = os.path.join(root, file)
@@ -110,4 +113,19 @@ def default_slicing(input_audio, output_dir, min_duration=5000, silence_thresh=-
         return segments
     except Exception as e:
         logging.error(f"Error during default slicing: {e}")
+        raise
+
+def normalize_audio_ffmpeg(input_audio):
+    """Normalize audio to -6 dB true peak using FFmpeg."""
+    try:
+        output_audio = os.path.splitext(input_audio)[0] + "_normalized.wav"
+        command = [
+            "ffmpeg", "-i", input_audio, "-af", "loudnorm=I=-6:TP=-1.5:LRA=11",
+            "-ar", "44100", "-ac", "2", output_audio
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logging.info(f"Normalized audio saved to {output_audio}")
+        return output_audio
+    except Exception as e:
+        logging.error(f"Error normalizing {input_audio} with FFmpeg: {e}")
         raise
