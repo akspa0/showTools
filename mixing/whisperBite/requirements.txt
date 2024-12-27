@@ -1,0 +1,6 @@
+pydub
+torch
+whisper
+pyannote.audio
+termcolor
+demucs
