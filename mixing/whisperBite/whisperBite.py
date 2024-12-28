@@ -7,6 +7,7 @@ from whisper import load_model
 from pyannote.audio import Pipeline
 import torch
 from utils import sanitize_filename, download_audio, zip_results, convert_and_normalize_audio, default_slicing, normalize_audio_ffmpeg
+from vocal_separation import separate_vocals_with_demucs
 
 # Configure logging
 logging.basicConfig(
@@ -14,35 +15,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
-def separate_vocals_with_demucs(input_audio, output_dir):
-    """Separate vocals from an audio file using Demucs."""
-    demucs_output_dir = os.path.join(output_dir, "demucs")
-    os.makedirs(demucs_output_dir, exist_ok=True)
-
-    try:
-        subprocess.run(
-            [
-                "demucs",
-                "--two-stems", "vocals",
-                "--out", demucs_output_dir,
-                input_audio
-            ],
-            check=True
-        )
-        model_dir = os.path.join(demucs_output_dir, "htdemucs")
-        input_base_name = os.path.splitext(os.path.basename(input_audio))[0]
-        vocals_dir = os.path.join(model_dir, input_base_name)
-        vocals_file = os.path.join(vocals_dir, "vocals.wav")
-
-        if not os.path.exists(vocals_file):
-            raise FileNotFoundError(f"Expected vocals file not found at {vocals_file}")
-
-        logging.info(f"Vocal separation completed. File saved to {vocals_file}")
-        return vocals_file
-    except Exception as e:
-        logging.error(f"Error during vocal separation: {e}")
-        raise
 
 def slice_audio_by_speaker(file_path, diarization, speaker_output_dir):
     """Slice audio by speakers based on diarization results."""
