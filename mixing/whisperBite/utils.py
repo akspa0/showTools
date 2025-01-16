@@ -200,13 +200,41 @@ def slice_by_word_timestamps(audio_file, segments, output_dir):
                                     if not word_text:
                                         continue
                                         
-                                    # Convert timestamps to milliseconds
+                                    # Convert timestamps to milliseconds and add padding
+                                    padding_ms = 250  # 0.25 seconds padding
                                     word_start = int(float(word_data['start']) * 1000)
                                     word_end = int(float(word_data['end']) * 1000)
+                                    
+                                    # Calculate padded timestamps
+                                    padded_start = max(0, word_start - padding_ms)
+                                    padded_end = min(len(audio), word_end + padding_ms)
+                                    
+                                    # Find word index in the segment's words list
+                                    word_idx = segment['words'].index(word_data)
+                                    
+                                    # Check if we're too close to adjacent words
+                                    if word_idx > 0:
+                                        prev_word = segment['words'][word_idx - 1]
+                                        prev_end = int(float(prev_word['end']) * 1000)
+                                        # Set padding to half the gap between words
+                                        start_padding = min(padding_ms, (word_start - prev_end) // 2)
+                                        padded_start = word_start - start_padding
+                                    
+                                    if word_idx < len(segment['words']) - 1:
+                                        next_word = segment['words'][word_idx + 1]
+                                        next_start = int(float(next_word['start']) * 1000)
+                                        # Set padding to half the gap between words
+                                        end_padding = min(padding_ms, (next_start - word_end) // 2)
+                                        padded_end = word_end + end_padding
 
-                                    if word_start < word_end and word_end <= len(audio):
-                                        # Extract the word segment
-                                        word_segment = audio[word_start:word_end]
+                                    if padded_start < padded_end and padded_end <= len(audio):
+                                        # Extract the word segment with padding
+                                        word_segment = audio[padded_start:padded_end]
+                                        
+                                        # Apply short fade in/out to smooth transitions
+                                        fade_duration = min(50, len(word_segment) // 4)  # 50ms or 1/4 of segment
+                                        if fade_duration > 0:
+                                            word_segment = word_segment.fade_in(fade_duration).fade_out(fade_duration)
                                         
                                         # Remove any punctuation from the word text for the filename
                                         clean_word = word_text.strip('.,!?;:"\'')
