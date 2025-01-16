@@ -1,18 +1,16 @@
 # showTools
 pre and post-processing tools for audio. 
 
+``whisperBite``
+mixing/whisperBite/whisperBite.py - Using OpenAI's whisper Turbo model, transcribe audio into soundbites, quickly and easily. Supports --url option with yt-dlp as a backend, along with Demucs to split vocal audio.
 
-mixing/preMix33C.py - A premixing script for stereo recordings. Uses below mix-stereo script for Asterisk/FreePBX for input data. In a constant state of breaking changes that are minimally tested - https://github.com/akspa0/showTools/blob/main/README_preMix.md
+mixing/miscAudioTools/merge_audio.py - Quick script to merge Vocal and Instrument tracks into a single stereo audio track.
 
-mixing/fapMix/fapMix0x00.py - using FishAudioProcessor and Whisper for audio transcription, outputs labelled soundbites from human speech, for dataset use.
+mixing/miscAudioTools/convertToMono.py - Converts a file or folders with sub-directories to mono. 
 
-mixing/merge_audio.py - Quick script to merge Vocal and Instrument tracks into a single stereo audio track.
+mixing/miscAudioTools/5.1_tool.py - Convert from or to 5.1 surround FLAC files.
 
-generic_tools/convertToMono.py - Converts a file or folders with sub-directories to mono. 
-
-generic_tools/5.1_tool.py - Convert from or to 5.1 surround FLAC files.
-
-generic_tools/splitOrConcat.py - Splits or Concatenates audio files into 15 minute (default) segments.
+mixing/miscAudioTools/splitOrConcat.py - Splits or Concatenates audio files into 15 minute (default) segments.
 
 ---
 
