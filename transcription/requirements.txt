@@ -1,4 +1,0 @@
-google-cloud-speech
-pydub
-tqdm
-audioread
