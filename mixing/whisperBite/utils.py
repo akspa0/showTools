@@ -146,7 +146,7 @@ def default_slicing(input_audio, output_dir, min_duration=5000, silence_thresh=-
         logging.error(f"Error during default slicing: {e}")
         raise
 
-def slice_by_word_timestamps(audio_file, timestamps, output_dir):
+def slice_by_word_timestamps(audio_file, segments, output_dir):
     """Slice audio file into word-level segments using Whisper timestamps."""
     try:
         if not os.path.exists(audio_file):
@@ -154,42 +154,58 @@ def slice_by_word_timestamps(audio_file, timestamps, output_dir):
             
         logging.info(f"Starting word-level slicing for {audio_file}")
         audio = AudioSegment.from_file(audio_file)
-        segments = []
+        output_segments = []
 
         # Create a directory for word-level segments
         words_dir = os.path.join(output_dir, "words")
         os.makedirs(words_dir, exist_ok=True)
 
-        for segment in timestamps:
-            # Process each word in the segment if available
-            if 'words' in segment:
-                for word in segment['words']:
-                    try:
-                        start_ms = int(float(word['start']) * 1000)
-                        end_ms = int(float(word['end']) * 1000)
-                        word_text = word['text'].strip()
+        if not segments or not isinstance(segments, list):
+            raise ValueError(f"Invalid segments data: {segments}")
 
-                        if word_text and start_ms < end_ms and end_ms <= len(audio):
-                            # Extract the word segment
-                            word_segment = audio[start_ms:end_ms]
-                            
-                            # Create filename using timestamp and word
-                            safe_word = sanitize_filename(word_text)
-                            segment_path = os.path.join(words_dir, 
-                                f"word_{safe_word}_{start_ms}_{end_ms}.wav")
-                            
-                            # Export the segment
-                            word_segment.export(segment_path, format="wav")
-                            segments.append(segment_path)
-                            logging.info(f"Saved word segment: {segment_path}")
-                        else:
-                            logging.warning(f"Skipping invalid word segment: {word_text} ({start_ms}ms to {end_ms}ms)")
-                    except (KeyError, ValueError) as e:
-                        logging.error(f"Error processing word timestamp: {e}")
-                        continue
+        # Log the segment structure for debugging
+        for i, segment in enumerate(segments):
+            logging.debug(f"Processing segment {i}:")
+            logging.debug(f"Segment keys: {segment.keys() if isinstance(segment, dict) else 'Not a dictionary'}")
+            
+            if not isinstance(segment, dict):
+                logging.warning(f"Skipping invalid segment format: {segment}")
+                continue
 
-        logging.info(f"Audio split into {len(segments)} word segments")
-        return segments
+            try:
+                # Get the start and end times for the segment
+                start = segment.get('start')
+                end = segment.get('end')
+                text = segment.get('text', '').strip()
+
+                if start is None or end is None:
+                    logging.warning(f"Missing timestamp data in segment: {segment}")
+                    continue
+
+                start_ms = int(float(start) * 1000)
+                end_ms = int(float(end) * 1000)
+
+                if text and start_ms < end_ms and end_ms <= len(audio):
+                    # Extract the segment
+                    word_segment = audio[start_ms:end_ms]
+                    
+                    # Create filename using timestamp and text
+                    safe_word = sanitize_filename(text)
+                    segment_path = os.path.join(words_dir, 
+                        f"segment_{safe_word}_{start_ms}_{end_ms}.wav")
+                    
+                    # Export the segment
+                    word_segment.export(segment_path, format="wav")
+                    output_segments.append(segment_path)
+                    logging.info(f"Saved segment: {segment_path}")
+                else:
+                    logging.warning(f"Skipping invalid segment: {text} ({start_ms}ms to {end_ms}ms)")
+            except (ValueError, TypeError) as e:
+                logging.error(f"Error processing segment {i}: {e}")
+                continue
+
+        logging.info(f"Audio split into {len(output_segments)} word segments")
+        return output_segments
     except FileNotFoundError as e:
         logging.error(str(e))
         raise

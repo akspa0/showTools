@@ -44,39 +44,59 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir):
 
 def transcribe_with_whisper(model, audio_files, output_dir, word_timestamps=False):
     """Transcribe audio files using Whisper with optional word-level timestamps."""
+    results = []
     for audio_file in audio_files:
         if not os.path.exists(audio_file):
             logging.error(f"Audio file not found: {audio_file}")
             continue
 
-        logging.info(f"Transcribing file: {audio_file}")
-        # Configure Whisper options for word timestamps
-        options = {
-            "word_timestamps": word_timestamps,
-            "language": None,  # Auto-detect language
-            "task": "transcribe"
-        }
-        transcription = model.transcribe(audio_file, **options)
-        transcription_text = transcription['text'].strip()
+        try:
+            logging.info(f"Transcribing file: {audio_file}")
+            # Configure Whisper options for word timestamps
+            transcription = model.transcribe(
+                audio_file,
+                word_timestamps=True if word_timestamps else None,
+                language=None,  # Auto-detect language
+                verbose=True if word_timestamps else None  # Show progress for word timestamps
+            )
+            
+            # Log the structure of the transcription for debugging
+            if word_timestamps:
+                logging.debug("Transcription structure:")
+                for key in transcription.keys():
+                    logging.debug(f"Key: {key}")
+                    if key == 'segments':
+                        for i, segment in enumerate(transcription['segments']):
+                            logging.debug(f"Segment {i} keys: {segment.keys()}")
+                            if 'words' in segment:
+                                logging.debug(f"Words data available in segment {i}")
+            
+            transcription_text = transcription.get('text', '').strip()
 
-        # Create a base name for the files
-        base_name = sanitize_filename(transcription_text[:50] if transcription_text else "transcription")
-        transcription_file = os.path.join(output_dir, f"{base_name}.txt")
-        timestamps_file = os.path.join(output_dir, f"{base_name}_timestamps.json")
+            # Create a base name for the files
+            base_name = sanitize_filename(transcription_text[:50] if transcription_text else "transcription")
+            transcription_file = os.path.join(output_dir, f"{base_name}.txt")
+            timestamps_file = os.path.join(output_dir, f"{base_name}_timestamps.json")
 
-        # Save the full transcription text
-        with open(transcription_file, "w", encoding='utf-8') as f:
-            f.write(transcription_text)
+            # Save the full transcription text
+            with open(transcription_file, "w", encoding='utf-8') as f:
+                f.write(transcription_text)
 
-        # Save the detailed segments with timestamps
-        import json
-        with open(timestamps_file, "w", encoding='utf-8') as f:
-            json.dump(transcription['segments'], f, indent=2, ensure_ascii=False)
+            # Save the detailed segments with timestamps
+            import json
+            with open(timestamps_file, "w", encoding='utf-8') as f:
+                json.dump(transcription.get('segments', []), f, indent=2, ensure_ascii=False)
 
-        logging.info(f"Transcription saved to {transcription_file}")
-        logging.info(f"Timestamps saved to {timestamps_file}")
-        
-        return transcription
+            logging.info(f"Transcription saved to {transcription_file}")
+            logging.info(f"Timestamps saved to {timestamps_file}")
+            
+            results.append(transcription)
+        except Exception as e:
+            logging.error(f"Error transcribing {audio_file}: {e}")
+            continue
+    
+    # Return the last transcription if any were successful
+    return results[-1] if results else None
 
 def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers, use_voice_activation=False, enable_word_timestamps=False):
     """Unified pipeline for audio processing."""
