@@ -191,23 +191,38 @@ def slice_by_word_timestamps(audio_file, segments, output_dir):
                         output_segments.append(sentence_path)
                         logging.info(f"Saved sentence segment: {sentence_path}")
 
-                        # Process word level if available
+                        # Process word level
                         if 'words' in segment:
-                            for word in segment['words']:
+                            for word_data in segment['words']:
                                 try:
-                                    word_start = float(word.get('start', 0)) * 1000
-                                    word_end = float(word.get('end', 0)) * 1000
-                                    word_text = word.get('text', '').strip()
+                                    # Get the word text without leading/trailing spaces
+                                    word_text = word_data.get('word', '').strip()
+                                    if not word_text:
+                                        continue
+                                        
+                                    # Convert timestamps to milliseconds
+                                    word_start = int(float(word_data['start']) * 1000)
+                                    word_end = int(float(word_data['end']) * 1000)
 
-                                    if word_text and word_start < word_end and word_end <= len(audio):
-                                        word_segment = audio[int(word_start):int(word_end)]
-                                        safe_word = sanitize_filename(word_text)
+                                    if word_start < word_end and word_end <= len(audio):
+                                        # Extract the word segment
+                                        word_segment = audio[word_start:word_end]
+                                        
+                                        # Remove any punctuation from the word text for the filename
+                                        clean_word = word_text.strip('.,!?;:"\'')
+                                        safe_word = sanitize_filename(clean_word)
+                                        
+                                        # Create filename with index to preserve order
                                         word_path = os.path.join(words_dir,
-                                            f"word_{safe_word}_{int(word_start)}_{int(word_end)}.wav")
+                                            f"{i:03d}_{safe_word}_{word_start}_{word_end}.wav")
+                                        
+                                        # Export the segment
                                         word_segment.export(word_path, format="wav")
                                         output_segments.append(word_path)
-                                        logging.info(f"Saved word segment: {word_path}")
-                                except (ValueError, TypeError) as e:
+                                        logging.info(f"Saved word segment: {word_path} ({word_text})")
+                                    else:
+                                        logging.warning(f"Invalid word timing: {word_text} ({word_start}ms to {word_end}ms)")
+                                except (KeyError, ValueError) as e:
                                     logging.error(f"Error processing word in segment {i}: {e}")
                                     continue
                 else:

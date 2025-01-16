@@ -53,12 +53,25 @@ def transcribe_with_whisper(model, audio_files, output_dir, word_timestamps=Fals
         try:
             logging.info(f"Transcribing file: {audio_file}")
             # Configure Whisper options for word timestamps
-            transcription = model.transcribe(
-                audio_file,
-                word_timestamps=True if word_timestamps else None,
-                language=None,  # Auto-detect language
-                verbose=True if word_timestamps else None  # Show progress for word timestamps
-            )
+            options = {
+                "task": "transcribe",
+                "language": None,  # Auto-detect language
+                "verbose": True,
+                "word_timestamps": True,
+                "condition_on_previous_text": False,
+                "suppress_tokens": None,
+                "fp16": False  # Use fp32 for better accuracy with word timestamps
+            }
+            
+            transcription = model.transcribe(audio_file, **options)
+            
+            # Debug log for word timestamps
+            if word_timestamps:
+                for segment in transcription.get('segments', []):
+                    logging.debug(f"Segment text: {segment.get('text', '')}")
+                    if 'words' in segment:
+                        for word in segment['words']:
+                            logging.debug(f"Word data: {word}")
             
             # Log the structure of the transcription for debugging
             if word_timestamps:
