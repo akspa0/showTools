@@ -147,64 +147,76 @@ def default_slicing(input_audio, output_dir, min_duration=5000, silence_thresh=-
         raise
 
 def slice_by_word_timestamps(audio_file, segments, output_dir):
-    """Slice audio file into word-level segments using Whisper timestamps."""
+    """Slice audio file into both sentence and word-level segments using Whisper timestamps."""
     try:
         if not os.path.exists(audio_file):
             raise FileNotFoundError(f"Audio file not found: {audio_file}")
             
-        logging.info(f"Starting word-level slicing for {audio_file}")
+        logging.info(f"Starting sentence and word-level slicing for {audio_file}")
         audio = AudioSegment.from_file(audio_file)
         output_segments = []
 
-        # Create a directory for word-level segments
+        # Create directories for both sentence and word-level segments
+        sentences_dir = os.path.join(output_dir, "sentences")
         words_dir = os.path.join(output_dir, "words")
+        os.makedirs(sentences_dir, exist_ok=True)
         os.makedirs(words_dir, exist_ok=True)
 
         if not segments or not isinstance(segments, list):
             raise ValueError(f"Invalid segments data: {segments}")
 
-        # Log the segment structure for debugging
+        # Process each segment (sentence)
         for i, segment in enumerate(segments):
-            logging.debug(f"Processing segment {i}:")
-            logging.debug(f"Segment keys: {segment.keys() if isinstance(segment, dict) else 'Not a dictionary'}")
-            
             if not isinstance(segment, dict):
                 logging.warning(f"Skipping invalid segment format: {segment}")
                 continue
 
             try:
-                # Get the start and end times for the segment
+                # Process sentence level
                 start = segment.get('start')
                 end = segment.get('end')
                 text = segment.get('text', '').strip()
 
-                if start is None or end is None:
-                    logging.warning(f"Missing timestamp data in segment: {segment}")
-                    continue
+                if start is not None and end is not None and text:
+                    start_ms = int(float(start) * 1000)
+                    end_ms = int(float(end) * 1000)
 
-                start_ms = int(float(start) * 1000)
-                end_ms = int(float(end) * 1000)
+                    if start_ms < end_ms and end_ms <= len(audio):
+                        # Extract and save sentence segment
+                        sentence_segment = audio[start_ms:end_ms]
+                        safe_text = sanitize_filename(text[:30])  # Limit length for filename
+                        sentence_path = os.path.join(sentences_dir, 
+                            f"sentence_{i}_{safe_text}_{start_ms}_{end_ms}.wav")
+                        sentence_segment.export(sentence_path, format="wav")
+                        output_segments.append(sentence_path)
+                        logging.info(f"Saved sentence segment: {sentence_path}")
 
-                if text and start_ms < end_ms and end_ms <= len(audio):
-                    # Extract the segment
-                    word_segment = audio[start_ms:end_ms]
-                    
-                    # Create filename using timestamp and text
-                    safe_word = sanitize_filename(text)
-                    segment_path = os.path.join(words_dir, 
-                        f"segment_{safe_word}_{start_ms}_{end_ms}.wav")
-                    
-                    # Export the segment
-                    word_segment.export(segment_path, format="wav")
-                    output_segments.append(segment_path)
-                    logging.info(f"Saved segment: {segment_path}")
+                        # Process word level if available
+                        if 'words' in segment:
+                            for word in segment['words']:
+                                try:
+                                    word_start = float(word.get('start', 0)) * 1000
+                                    word_end = float(word.get('end', 0)) * 1000
+                                    word_text = word.get('text', '').strip()
+
+                                    if word_text and word_start < word_end and word_end <= len(audio):
+                                        word_segment = audio[int(word_start):int(word_end)]
+                                        safe_word = sanitize_filename(word_text)
+                                        word_path = os.path.join(words_dir,
+                                            f"word_{safe_word}_{int(word_start)}_{int(word_end)}.wav")
+                                        word_segment.export(word_path, format="wav")
+                                        output_segments.append(word_path)
+                                        logging.info(f"Saved word segment: {word_path}")
+                                except (ValueError, TypeError) as e:
+                                    logging.error(f"Error processing word in segment {i}: {e}")
+                                    continue
                 else:
-                    logging.warning(f"Skipping invalid segment: {text} ({start_ms}ms to {end_ms}ms)")
+                    logging.warning(f"Skipping invalid sentence segment: {text}")
             except (ValueError, TypeError) as e:
                 logging.error(f"Error processing segment {i}: {e}")
                 continue
 
-        logging.info(f"Audio split into {len(output_segments)} word segments")
+        logging.info(f"Audio split into {len(output_segments)} segments (sentences and words)")
         return output_segments
     except FileNotFoundError as e:
         logging.error(str(e))

@@ -3,8 +3,10 @@
 This tool processes audio files into transcribed soundbites, leveraging OpenAI's Whisper for transcription and pyannote.audio for speaker diarization. It includes features like vocal separation, silence-based slicing, and downloadable audio from URLs.
 
 ## Features
-- **Audio Transcription**: Uses Whisper to transcribe audio into text.
+- **Audio Transcription**: Uses Whisper to transcribe audio into text with word-level timestamps.
 - **Speaker Diarization**: Splits audio by speakers (default: 2 speakers, configurable).
+- **Voice Activation**: Alternative to speaker diarization, splits audio based on voice activity.
+- **Word & Sentence Slicing**: Creates individual audio files for words and sentences with timestamps.
 - **Vocal Separation**: Optionally isolate vocals using Demucs.
 - **Silence-Based Slicing**: Automatically slices audio into smaller chunks.
 - **Audio Download**: Downloads audio from URLs and names files after video titles.
@@ -65,6 +67,8 @@ python whisperBite.py [OPTIONS]
 | `--model`                  | Whisper model to use (`base`, `small`, `medium`, `large`, `turbo`).         | `turbo`         |
 | `--num_speakers`           | Number of speakers for diarization.                                          | `2`             |
 | `--enable_vocal_separation`| Enable vocal separation using Demucs.                                       | Disabled        |
+| `--use_voice_activation`   | Use voice activation-based slicing instead of speaker diarization.          | Disabled        |
+| `--enable_word_timestamps` | Enable word-level timestamps and slicing.                                   | Disabled        |
 
 ### Examples
 #### Process a Single Audio File
@@ -92,6 +96,21 @@ python whisperBite.py --input_file path/to/audio.wav --output_dir path/to/output
 python whisperBite.py --input_file path/to/audio.wav --output_dir path/to/output --num_speakers 3
 ```
 
+#### Use Voice Activation Instead of Speaker Diarization
+```bash
+python whisperBite.py --input_file path/to/audio.wav --output_dir path/to/output --use_voice_activation
+```
+
+#### Enable Word-Level Timestamps and Slicing
+```bash
+python whisperBite.py --input_file path/to/audio.wav --output_dir path/to/output --enable_word_timestamps
+```
+
+#### Combine Voice Activation with Word Timestamps
+```bash
+python whisperBite.py --input_file path/to/audio.wav --output_dir path/to/output --use_voice_activation --enable_word_timestamps
+```
+
 ## Output Structure
 The script saves output files in the following structure:
 ```
@@ -101,16 +120,27 @@ output_dir/
             audio_normalized.wav
         demucs/
             vocals.wav
-        speakers/
+        speakers/                           # When using speaker diarization
             Speaker_1/
                 segment_0_10.wav
                 segment_10_20.wav
             Speaker_2/
                 segment_0_10.wav
-        Speaker_1_transcriptions/
+        voice_segments_transcriptions/      # When using voice activation
+            voice_segment_0_0_30.wav
+            voice_segment_1_35_50.wav
+        Speaker_1_transcriptions/           # For each speaker or voice segment
             transcription_1.txt
-        Speaker_2_transcriptions/
-            transcription_2.txt
+            transcription_1_timestamps.json
+            sentences/                      # When word timestamps enabled
+                sentence_0_hello_world_0_1000.wav
+                sentence_1_how_are_you_1000_2000.wav
+            words/                          # Individual words from sentences
+                word_hello_0_500.wav
+                word_world_500_1000.wav
+                word_how_1000_1200.wav
+                word_are_1200_1500.wav
+                word_you_1500_2000.wav
     <audio_file_name>_results.zip
 ```
 
@@ -120,4 +150,4 @@ output_dir/
 - Ensure sufficient disk space for intermediate files and results.
 
 ## License
-Creative Commons Attribution-ShareAlike 4.0 
+Creative Commons Attribution-ShareAlike 4.0
