@@ -1,9 +1,13 @@
-pydub
-whisper
-pyannote.audio
-torch
-termcolor
-ffmpeg-python
-yt-dlp
-demucs
-gradio
+# Core dependencies
+pydub==0.25.1
+openai-whisper==20231117
+pyannote.audio==2.1.1
+torch==2.1.0
+termcolor==2.3.0
+ffmpeg-python==0.2.0
+yt-dlp==2023.11.16
+demucs==4.0.1
+gradio==4.7.1
+
+# Note: Install numba and numpy via conda:
+# conda install numba==0.56.4 numpy==1.23.5

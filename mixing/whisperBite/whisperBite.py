@@ -6,7 +6,10 @@ import logging
 from whisper import load_model
 from pyannote.audio import Pipeline
 import torch
-from utils import sanitize_filename, download_audio, zip_results, convert_and_normalize_audio, default_slicing, normalize_audio_ffmpeg
+from utils import (
+    sanitize_filename, download_audio, zip_results, convert_and_normalize_audio,
+    slice_on_voice_activity, slice_by_word_timestamps, normalize_audio_ffmpeg
+)
 from vocal_separation import separate_vocals_with_demucs
 
 # Configure logging
@@ -39,29 +42,47 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir):
 
     return speaker_files
 
-def transcribe_with_whisper(model, audio_files, output_dir):
-    """Transcribe audio files using Whisper."""
+def transcribe_with_whisper(model, audio_files, output_dir, word_timestamps=False):
+    """Transcribe audio files using Whisper with optional word-level timestamps."""
     for audio_file in audio_files:
+        if not os.path.exists(audio_file):
+            logging.error(f"Audio file not found: {audio_file}")
+            continue
+
         logging.info(f"Transcribing file: {audio_file}")
-        transcription = model.transcribe(audio_file)
+        # Configure Whisper options for word timestamps
+        options = {
+            "word_timestamps": word_timestamps,
+            "language": None,  # Auto-detect language
+            "task": "transcribe"
+        }
+        transcription = model.transcribe(audio_file, **options)
         transcription_text = transcription['text'].strip()
 
+        # Create a base name for the files
         base_name = sanitize_filename(transcription_text[:50] if transcription_text else "transcription")
         transcription_file = os.path.join(output_dir, f"{base_name}.txt")
-        audio_output_file = os.path.join(output_dir, f"{base_name}.wav")
+        timestamps_file = os.path.join(output_dir, f"{base_name}_timestamps.json")
 
-        with open(transcription_file, "w") as f:
+        # Save the full transcription text
+        with open(transcription_file, "w", encoding='utf-8') as f:
             f.write(transcription_text)
 
-        os.rename(audio_file, audio_output_file)
-        logging.info(f"Transcription saved to {transcription_file} and renamed audio to {audio_output_file}")
+        # Save the detailed segments with timestamps
+        import json
+        with open(timestamps_file, "w", encoding='utf-8') as f:
+            json.dump(transcription['segments'], f, indent=2, ensure_ascii=False)
 
-def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers):
+        logging.info(f"Transcription saved to {transcription_file}")
+        logging.info(f"Timestamps saved to {timestamps_file}")
+        
+        return transcription
+
+def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers, use_voice_activation=False, enable_word_timestamps=False):
     """Unified pipeline for audio processing."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
-    logging.info(f"Expected number of speakers: {num_speakers}")
-
+    
     processed_files = []
     audio_files = [input_path] if os.path.isfile(input_path) else [
         os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith(('.mp3', '.wav', '.m4a'))
@@ -78,43 +99,79 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
                 logging.info("Performing vocal separation.")
                 vocals_file = separate_vocals_with_demucs(normalized_file, base_output_dir)
                 if os.path.exists(vocals_file):
-                    processed_files.append((vocals_file, base_output_dir))
+                    processed_file = vocals_file
                 else:
                     logging.error(f"Vocal-separated file {vocals_file} not found.")
                     continue
             else:
-                processed_files.append((normalized_file, base_output_dir))
+                processed_file = normalized_file
+
+            model = load_model(model_name)
+            
+            if use_voice_activation:
+                # Use voice activity detection for slicing
+                logging.info("Using voice activation-based slicing")
+                segments = slice_on_voice_activity(processed_file, base_output_dir)
+                
+                # Process each voice segment
+                for segment in segments:
+                    segment_dir = os.path.join(base_output_dir, "voice_segments_transcriptions")
+                    os.makedirs(segment_dir, exist_ok=True)
+                    
+                    # Normalize the segment and keep track of both original and normalized paths
+                    normalized_segment = normalize_audio_ffmpeg(segment)
+                    
+                    # Transcribe with word timestamps if enabled
+                    transcription = transcribe_with_whisper(model, [normalized_segment], segment_dir, enable_word_timestamps)
+                    
+                    if enable_word_timestamps and transcription:
+                        try:
+                            # Use the normalized segment for word-level slicing
+                            logging.info(f"Processing word-level slicing for {normalized_segment}")
+                            slice_by_word_timestamps(normalized_segment, transcription['segments'], segment_dir)
+                        except Exception as e:
+                            logging.error(f"Error during word-level slicing of {normalized_segment}: {e}")
+            else:
+                # Use speaker diarization
+                logging.info(f"Using speaker diarization with {num_speakers} expected speakers")
+                pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
+                pipeline.to(device)
+                
+                speaker_output_dir = os.path.join(base_output_dir, "speakers")
+                diarization = pipeline(processed_file)
+                speaker_files = slice_audio_by_speaker(processed_file, diarization, speaker_output_dir)
+
+                for speaker, segments in speaker_files.items():
+                    speaker_transcription_dir = os.path.join(base_output_dir, f"Speaker_{speaker}_transcriptions")
+                    os.makedirs(speaker_transcription_dir, exist_ok=True)
+
+                    # Normalize and boost soundbites after slicing
+                    normalized_segments = []
+                    for segment in segments:
+                        normalized_segment = normalize_audio_ffmpeg(segment)
+                        normalized_segments.append(normalized_segment)
+
+                    # Transcribe with word timestamps if enabled
+                    transcription = transcribe_with_whisper(model, normalized_segments, speaker_transcription_dir, enable_word_timestamps)
+                    
+                    # Process each segment for word-level slicing
+                    if enable_word_timestamps and transcription and 'segments' in transcription:
+                        for segment_file, segment_transcription in zip(normalized_segments, transcription['segments']):
+                            try:
+                                if os.path.exists(segment_file):
+                                    logging.info(f"Processing word-level slicing for {segment_file}")
+                                    slice_by_word_timestamps(segment_file, [segment_transcription], speaker_transcription_dir)
+                                else:
+                                    logging.error(f"Audio file not found for word-level slicing: {segment_file}")
+                            except Exception as e:
+                                logging.error(f"Error during word-level slicing of {segment_file}: {e}")
+
         except Exception as e:
             logging.error(f"Error processing {audio_file}: {e}")
             continue
 
-    model = load_model(model_name)
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
-    pipeline.to(device)
-
-    for processed_file, file_output_dir in processed_files:
-        try:
-            speaker_output_dir = os.path.join(file_output_dir, "speakers")
-            diarization = pipeline(processed_file)
-            speaker_files = slice_audio_by_speaker(processed_file, diarization, speaker_output_dir)
-
-            for speaker, segments in speaker_files.items():
-                speaker_transcription_dir = os.path.join(file_output_dir, f"Speaker_{speaker}_transcriptions")
-                os.makedirs(speaker_transcription_dir, exist_ok=True)
-
-                # Normalize and boost soundbites after slicing
-                normalized_segments = []
-                for segment in segments:
-                    normalized_segment = normalize_audio_ffmpeg(segment)
-                    normalized_segments.append(normalized_segment)
-
-                transcribe_with_whisper(model, normalized_segments, speaker_transcription_dir)
-        except Exception as e:
-            logging.error(f"Error during diarization or transcription for {processed_file}: {e}")
-            continue
-
-        # Zip the results for the processed file
-        zip_results(file_output_dir, processed_file)
+        # Zip the results
+        zip_results(base_output_dir, audio_file)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -127,6 +184,10 @@ def main():
     parser.add_argument('--model', type=str, default="turbo", help='Whisper model to use (default: turbo).')
     parser.add_argument('--num_speakers', type=int, default=2, help='Number of speakers for diarization (default: 2).')
     parser.add_argument('--enable_vocal_separation', action='store_true', help='Enable vocal separation using Demucs.')
+    parser.add_argument('--use_voice_activation', action='store_true', 
+                       help='Use voice activation-based slicing instead of speaker diarization.')
+    parser.add_argument('--enable_word_timestamps', action='store_true',
+                       help='Enable word-level timestamps and slicing.')
     args = parser.parse_args()
 
     if not any([args.input_dir, args.input_file, args.url]):
@@ -152,7 +213,9 @@ def main():
         main_output_dir,
         args.model,
         args.enable_vocal_separation,
-        args.num_speakers
+        args.num_speakers,
+        args.use_voice_activation,
+        args.enable_word_timestamps
     )
 
 if __name__ == "__main__":

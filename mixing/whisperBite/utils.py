@@ -90,6 +90,37 @@ def convert_and_normalize_audio(input_audio, output_dir):
         logging.error(f"Error normalizing {input_audio}: {e}")
         raise
 
+def slice_on_voice_activity(input_audio, output_dir, min_silence_len=1000, silence_thresh=-40, min_duration=1000):
+    """Slice audio based on voice activity detection."""
+    try:
+        from pydub.silence import detect_nonsilent
+        logging.info(f"Starting voice activity-based slicing for {input_audio}")
+        audio = AudioSegment.from_file(input_audio)
+        
+        # Split on silence (non-voice segments)
+        chunks = detect_nonsilent(
+            audio,
+            min_silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            seek_step=10
+        )
+        
+        segments = []
+        for i, (start, end) in enumerate(chunks):
+            # Only keep segments longer than min_duration
+            if end - start >= min_duration:
+                segment = audio[start:end]
+                segment_path = os.path.join(output_dir, f"voice_segment_{i}_{start}_{end}.wav")
+                segment.export(segment_path, format="wav")
+                segments.append(segment_path)
+                logging.info(f"Saved voice segment: {segment_path}")
+        
+        logging.info(f"Audio split into {len(segments)} voice segments")
+        return segments
+    except Exception as e:
+        logging.error(f"Error during voice activity slicing: {e}")
+        raise
+
 def default_slicing(input_audio, output_dir, min_duration=5000, silence_thresh=-40):
     """Slice audio into smaller chunks based on silence or duration."""
     try:
@@ -113,6 +144,57 @@ def default_slicing(input_audio, output_dir, min_duration=5000, silence_thresh=-
         return segments
     except Exception as e:
         logging.error(f"Error during default slicing: {e}")
+        raise
+
+def slice_by_word_timestamps(audio_file, timestamps, output_dir):
+    """Slice audio file into word-level segments using Whisper timestamps."""
+    try:
+        if not os.path.exists(audio_file):
+            raise FileNotFoundError(f"Audio file not found: {audio_file}")
+            
+        logging.info(f"Starting word-level slicing for {audio_file}")
+        audio = AudioSegment.from_file(audio_file)
+        segments = []
+
+        # Create a directory for word-level segments
+        words_dir = os.path.join(output_dir, "words")
+        os.makedirs(words_dir, exist_ok=True)
+
+        for segment in timestamps:
+            # Process each word in the segment if available
+            if 'words' in segment:
+                for word in segment['words']:
+                    try:
+                        start_ms = int(float(word['start']) * 1000)
+                        end_ms = int(float(word['end']) * 1000)
+                        word_text = word['text'].strip()
+
+                        if word_text and start_ms < end_ms and end_ms <= len(audio):
+                            # Extract the word segment
+                            word_segment = audio[start_ms:end_ms]
+                            
+                            # Create filename using timestamp and word
+                            safe_word = sanitize_filename(word_text)
+                            segment_path = os.path.join(words_dir, 
+                                f"word_{safe_word}_{start_ms}_{end_ms}.wav")
+                            
+                            # Export the segment
+                            word_segment.export(segment_path, format="wav")
+                            segments.append(segment_path)
+                            logging.info(f"Saved word segment: {segment_path}")
+                        else:
+                            logging.warning(f"Skipping invalid word segment: {word_text} ({start_ms}ms to {end_ms}ms)")
+                    except (KeyError, ValueError) as e:
+                        logging.error(f"Error processing word timestamp: {e}")
+                        continue
+
+        logging.info(f"Audio split into {len(segments)} word segments")
+        return segments
+    except FileNotFoundError as e:
+        logging.error(str(e))
+        raise
+    except Exception as e:
+        logging.error(f"Error during word-level slicing: {e}")
         raise
 
 def normalize_audio_ffmpeg(input_audio):
