@@ -181,18 +181,29 @@ def slice_by_word_timestamps(audio_file, segments, output_dir):
                     start_ms = int(float(start) * 1000)
                     end_ms = int(float(end) * 1000)
 
-                    if start_ms < end_ms and end_ms <= len(audio):
-                        # Extract and save sentence segment
-                        sentence_segment = audio[start_ms:end_ms]
-                        safe_text = sanitize_filename(text[:30])  # Limit length for filename
-                        sentence_path = os.path.join(sentences_dir, 
-                            f"sentence_{i}_{safe_text}_{start_ms}_{end_ms}.wav")
-                        sentence_segment.export(sentence_path, format="wav")
-                        output_segments.append(sentence_path)
-                        logging.info(f"Saved sentence segment: {sentence_path}")
+                if start_ms < end_ms and end_ms <= len(audio):
+                    # Add padding to sentence segments (500ms on each end)
+                    padding_ms = 500
+                    padded_start = max(0, start_ms - padding_ms)
+                    padded_end = min(len(audio), end_ms + padding_ms)
 
-                        # Process word level
-                        if 'words' in segment:
+                    # Extract and save sentence segment with padding
+                    sentence_segment = audio[padded_start:padded_end]
+                    
+                    # Apply fade in/out to smooth transitions
+                    fade_duration = min(100, len(sentence_segment) // 4)  # 100ms or 1/4 of segment
+                    if fade_duration > 0:
+                        sentence_segment = sentence_segment.fade_in(fade_duration).fade_out(fade_duration)
+                    
+                    safe_text = sanitize_filename(text[:30])  # Limit length for filename
+                    sentence_path = os.path.join(sentences_dir, 
+                        f"sentence_{i}_{safe_text}_{padded_start}_{padded_end}.wav")
+                    sentence_segment.export(sentence_path, format="wav")
+                    output_segments.append(sentence_path)
+                    logging.info(f"Saved sentence segment: {sentence_path}")
+
+                    # Process word level
+                    if 'words' in segment:
                             for word_data in segment['words']:
                                 try:
                                     # Get the word text without leading/trailing spaces

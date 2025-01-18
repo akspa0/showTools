@@ -184,16 +184,17 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
                         normalized_segment = normalize_audio_ffmpeg(segment)
                         normalized_segments.append(normalized_segment)
 
-                    # Transcribe with word timestamps if enabled
-                    transcription = transcribe_with_whisper(model, normalized_segments, speaker_transcription_dir, enable_word_timestamps)
-                    
-                    # Process each segment for word-level slicing
-                    if enable_word_timestamps and transcription and 'segments' in transcription:
-                        for segment_file, segment_transcription in zip(normalized_segments, transcription['segments']):
+                    # Transcribe each segment individually with word timestamps if enabled
+                    for segment_file in normalized_segments:
+                        segment_transcription = transcribe_with_whisper(model, [segment_file], speaker_transcription_dir, enable_word_timestamps)
+                        
+                        # Process word-level slicing for this segment
+                        if enable_word_timestamps and segment_transcription and 'segments' in segment_transcription:
                             try:
                                 if os.path.exists(segment_file):
                                     logging.info(f"Processing word-level slicing for {segment_file}")
-                                    slice_by_word_timestamps(segment_file, [segment_transcription], speaker_transcription_dir)
+                                    # Pass the entire segments list for this file
+                                    slice_by_word_timestamps(segment_file, segment_transcription['segments'], speaker_transcription_dir)
                                 else:
                                     logging.error(f"Audio file not found for word-level slicing: {segment_file}")
                             except Exception as e:
