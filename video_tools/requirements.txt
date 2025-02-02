@@ -1,0 +1,15 @@
+# Core dependencies
+numpy
+pillow
+tqdm
+opencv-python
+
+# PyTorch with CUDA support
+# For CUDA 11.8 (newer GPUs)
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch
+torchvision
+torchaudio
+
+# For image processing
+scikit-image
