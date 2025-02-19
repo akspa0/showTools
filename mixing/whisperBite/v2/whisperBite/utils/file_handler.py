@@ -76,6 +76,8 @@ class FileHandler:
         try:
             # Create base directory for this audio file
             base_name = os.path.splitext(os.path.basename(original_audio_name))[0]
+            # Remove any "_normalized" suffix if present
+            base_name = base_name.replace("_normalized", "")
             result_dir = os.path.join(base_output_dir, base_name)
             
             # Create required directories
@@ -152,6 +154,8 @@ class FileHandler:
     def save_vocals(vocals_path: str, output_dir: str, base_name: str) -> str:
         """Save vocal separation results."""
         try:
+            # Remove any "_normalized" suffix if present
+            base_name = base_name.replace("_normalized", "")
             vocals_dir = os.path.join(output_dir, base_name, "demucs")
             os.makedirs(vocals_dir, exist_ok=True)
             
@@ -191,30 +195,50 @@ class FileHandler:
         try:
             # Create archive name
             base_name = os.path.splitext(os.path.basename(original_filename))[0]
+            # Remove any "_normalized" suffix if present
+            base_name = base_name.replace("_normalized", "")
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             archive_name = f"{base_name}_whisperBite_{timestamp}.zip"
             archive_path = os.path.join(output_dir, archive_name)
             
+            logger.info(f"Creating archive at: {archive_path}")
+            added_files = []
+            
             # Create the zip file
             with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(output_dir):
+                for root, dirs, files in os.walk(output_dir):
+                    # Debug: print what we're looking at
+                    logger.debug(f"Checking directory: {root}")
+                    logger.debug(f"Contains directories: {dirs}")
+                    logger.debug(f"Contains files: {files}")
+                    
                     # Skip certain directories
-                    if any(x in root for x in ['normalized', 'demucs', 'vocals']):
+                    if any(x in root.lower() for x in ['normalized', 'demucs', 'vocals', 'temp']):
+                        logger.debug(f"Skipping directory {root} (in exclusion list)")
                         continue
-                        
+                    
                     for file in files:
-                        # Skip the archive itself and any temporary files
+                        # Skip the archive itself and temporary files
                         if file == archive_name or file.endswith(('.tmp', '.temp')):
                             continue
                             
                         file_path = os.path.join(root, file)
-                        # Only include wav files from speakers/ and words/ directories
-                        # and txt files from *_transcriptions/ directories
-                        if (('speakers' in root or 'words' in root) and file.endswith('.wav')) or \
-                           ('transcriptions' in root and file.endswith('.txt')):
-                            # Get relative path from output directory
-                            rel_path = os.path.relpath(file_path, output_dir)
+                        rel_path = os.path.relpath(file_path, output_dir)
+                        
+                        # Check if file should be included
+                        # Modified to catch any path containing 'word' or 'words'
+                        should_include = (
+                            (any(x in root.lower() for x in ['speaker', 'word']) and file.endswith('.wav')) or
+                            ('transcription' in root.lower() and file.endswith('.txt')) or
+                            (any(x in root.lower() for x in ['word', 'words']) and file.endswith('.txt'))
+                        )
+                        
+                        if should_include:
+                            logger.debug(f"Adding file to archive: {rel_path}")
                             zipf.write(file_path, rel_path)
+                            added_files.append(rel_path)
+                        else:
+                            logger.debug(f"Skipping file: {rel_path}")
                 
                 # Add README
                 readme_content = (
@@ -229,8 +253,11 @@ class FileHandler:
                     "Note: Files are numbered by their sequence in the original audio.\n"
                 )
                 zipf.writestr("README.txt", readme_content)
+                
+            logger.info(f"Created archive with {len(added_files)} files:")
+            for file in added_files:
+                logger.info(f"  - {file}")
             
-            logger.info(f"Created archive: {archive_path}")
             return archive_path
             
         except Exception as e:

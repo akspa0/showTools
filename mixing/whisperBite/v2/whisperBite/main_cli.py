@@ -35,7 +35,7 @@ def parse_arguments() -> argparse.Namespace:
                        help='Directory to save output files')
     
     # Processing options
-    parser.add_argument('--model', type=str, default="turbo",  # Changed default to turbo
+    parser.add_argument('--model', type=str, default="turbo",
                        choices=["base", "small", "medium", "large", "turbo"],
                        help='Whisper model to use')
     parser.add_argument('--num_speakers', type=int, default=2,
@@ -54,8 +54,30 @@ def parse_arguments() -> argparse.Namespace:
                        help='Enable verbose logging')
     parser.add_argument('--keep_temp', action='store_true',
                        help='Keep temporary files')
+    parser.add_argument('--export_format', type=str, default='both',
+                       choices=['json', 'txt', 'both'],
+                       help='Export format for transcriptions')
     
     return parser.parse_args()
+
+def get_input_path(args: argparse.Namespace, output_dir: str) -> Optional[str]:
+    """Determine and validate input path."""
+    try:
+        if args.url:
+            from whisperBite.utils.download import DownloadUtils
+            return DownloadUtils.download_audio(args.url, output_dir)
+        elif args.input_file:
+            if not os.path.exists(args.input_file):
+                raise AudioProcessingError(f"Input file not found: {args.input_file}")
+            return args.input_file
+        elif args.input_dir:
+            if not os.path.exists(args.input_dir):
+                raise AudioProcessingError(f"Input directory not found: {args.input_dir}")
+            return args.input_dir
+        return None
+    except Exception as e:
+        logging.error(f"Error processing input: {str(e)}")
+        raise AudioProcessingError(f"Failed to process input: {str(e)}")
 
 def main():
     """Main entry point."""
@@ -70,6 +92,11 @@ def main():
         output_dir = FileHandler.create_output_directory(args.output_dir)
         logging.info(f"Output directory: {output_dir}")
         
+        # Get input path
+        input_path = get_input_path(args, output_dir)
+        if not input_path:
+            raise AudioProcessingError("No valid input provided")
+        
         # Create processing options
         options = ProcessingOptions(
             word_level=args.word_level,
@@ -83,27 +110,25 @@ def main():
         # Initialize processor
         processor = AudioProcessor(output_dir)
         
-        # Process the audio
-        if args.url:
-            from whisperBite.utils.download import DownloadUtils
-            input_path = DownloadUtils.download_audio(args.url, output_dir)
-        elif args.input_file:
-            input_path = args.input_file
-        else:
-            input_path = args.input_dir
+        try:
+            # Process the audio
+            results = processor.process_audio(input_path, options)
             
-        if not input_path or not os.path.exists(input_path):
-            raise AudioProcessingError("No valid input provided")
+            # Create archive of outputs
+            archive_path = FileHandler.create_archive(output_dir, input_path)
+            logging.info(f"Created archive: {archive_path}")
             
-        # Process the file(s)
-        results = processor.process_audio(input_path, options)
-        
-        # Cleanup
-        if not args.keep_temp:
+            # Clean up if needed
+            if not args.keep_temp:
+                processor.cleanup()
+            
+            logging.info("Processing complete!")
+            return 0
+            
+        except Exception as e:
+            logging.error(f"Processing failed: {str(e)}")
             processor.cleanup()
-        
-        logging.info("Processing complete!")
-        return 0
+            return 1
         
     except KeyboardInterrupt:
         logging.info("\nProcessing interrupted by user")
