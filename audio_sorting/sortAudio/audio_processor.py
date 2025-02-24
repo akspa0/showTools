@@ -4,81 +4,133 @@ import whisper
 import librosa
 import numpy as np
 import json
+import datetime
+import soundfile as sf
+import re
+import subprocess
+
+def sanitize_filename(filename):
+    """Sanitizes a filename by removing invalid characters."""
+    return re.sub(r'[^\w\-_\.]', '', filename)
+
+def generate_text_based_filename(text, counter, base_dir, extension=".wav"):
+    """Generates a filename from text, counter, and base directory."""
+    sanitized_text = sanitize_filename(text.strip().replace(" ", "_"))
+    truncated_text = sanitized_text[:128]
+    filename = f"{counter:04d}_{truncated_text}{extension}"
+    return os.path.join(base_dir, filename)
 
 def detect_dtmf(audio_file):
-    """Detects DTMF tones in an audio file.
-
-    Args:
-        audio_file (str): Path to the audio file.
-
-    Returns:
-        list: A list of tuples, where each tuple contains the start and end time
-              (in seconds) of a detected DTMF tone sequence.
-    """
+    """Detects DTMF tones in an audio file."""
     y, sr = librosa.load(audio_file)
-    # hop_length = 512  # or 256, experiment with this value. Smaller values are more precise but slower.
     hop_length = int(sr * 0.01)  # 10ms hop
     frame_length = int(sr * 0.02) # 20ms frame
 
     dtmf_tones = []
     onsets = []
 
-    # Use librosa's onset detection
     onset_frames = librosa.onset.onset_detect(y=y, sr=sr, hop_length=hop_length, backtrack=True)
     onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=hop_length)
 
     for onset_time in onset_times:
         start_frame = int(librosa.time_to_frames(onset_time, sr=sr, hop_length=hop_length, n_fft=frame_length))
-        end_frame = start_frame + int(0.1 * sr / hop_length)  # Check 0.1 seconds after onset
+        end_frame = start_frame + int(0.1 * sr / hop_length)
 
         if end_frame * hop_length >= len(y):
           end_frame = int(len(y)/hop_length)-1
 
-        # Extract the segment of audio
         y_segment = y[start_frame * hop_length : end_frame * hop_length]
-
-        # Calculate the frequencies present in the segment
         frequencies = librosa.fft_frequencies(sr=sr, n_fft=frame_length)
         magnitudes = np.abs(np.fft.fft(y_segment, n=frame_length))[:len(frequencies)]
         magnitudes_db = librosa.amplitude_to_db(magnitudes, ref=np.max)
 
-        # Define DTMF frequencies
         dtmf_freqs = [697, 770, 852, 941, 1209, 1336, 1477, 1633]
-        tolerance = 5  # Frequency tolerance in Hz
+        tolerance = 5
 
-        # Check for DTMF tones
         dtmf_detected = False
         for freq in dtmf_freqs:
             lower_bound = freq - tolerance
             upper_bound = freq + tolerance
             peak_indices = np.where((frequencies >= lower_bound) & (frequencies <= upper_bound))[0]
-            if any(magnitudes_db[peak_indices] > -30):  # Check if magnitude is significant
+            if any(magnitudes_db[peak_indices] > -30):
                 dtmf_detected = True
                 break
 
         if dtmf_detected:
             onsets.append(onset_time)
 
-    # Merge close onsets
     if onsets:
       merged_onsets = [onsets[0]]
       for onset in onsets[1:]:
-          if onset - merged_onsets[-1] < 0.3:  # Merge if within 300ms
+          if onset - merged_onsets[-1] < 0.3:
               merged_onsets[-1] = onset
           else:
-              dtmf_tones.append((merged_onsets[-1]-0.1, merged_onsets[-1])) #add the onset and 100ms before
+              dtmf_tones.append((merged_onsets[-1]-0.1, merged_onsets[-1]))
               merged_onsets = [onset]
       dtmf_tones.append((merged_onsets[-1]-0.1, merged_onsets[-1]))
 
     return dtmf_tones
 
+def calculate_audio_quality(audio_segment, sr):
+    """Calculates a simple audio quality score."""
+    flatness = librosa.feature.spectral_flatness(y=audio_segment)
+    return np.mean(flatness)
+
+def query_local_llm(prompt):
+    """Placeholder for querying a local LLM (Ollama or llama.cpp)."""
+    # This function would need to:
+    # 1. Check if a local LLM server is running (Ollama or llama.cpp).
+    # 2. Construct the appropriate API request (likely a POST request).
+    # 3. Send the request and receive the response.
+    # 4. Parse the response to extract the relevant information (paragraph breaks).
+    print("Warning: Local LLM integration is not yet implemented.")
+    return []  # Return an empty list as a placeholder.
+
+def infer_paragraphs(segments, use_llm=False):
+    """Infers paragraph boundaries from sentence segments."""
+    if use_llm:
+        # Construct a prompt for the LLM.
+        prompt = "Identify the paragraph breaks in the following text:\n\n"
+        for i, segment in enumerate(segments):
+            prompt += f"{i+1}. {segment['text']}\n"
+        prompt += "\nParagraph breaks (sentence numbers):"
+        paragraph_indices = query_local_llm(prompt)
+        if paragraph_indices:
+            return paragraph_indices
+        # else, fall through to the heuristic
+
+    # Simple heuristic: group sentences with short pauses between them.
+    paragraphs = []
+    current_paragraph = []
+    if segments:
+      current_paragraph.append(0)
+      paragraphs.append(current_paragraph)
+
+    for i in range(len(segments) - 1):
+        current_end = segments[i]["end"]
+        next_start = segments[i+1]["start"]
+        if next_start - current_end < 1.0:
+            current_paragraph.append(i + 1)
+        else:
+            current_paragraph = [i + 1]
+            paragraphs.append(current_paragraph)
+    return paragraphs
+
 def main():
     parser = argparse.ArgumentParser(description="Audio File Processor")
     parser.add_argument("folder_path", help="Path to the folder containing audio files")
-    parser.add_argument("--model", default="turbo", help="Whisper model to use (e.g., tiny, base, small, medium, large)")
+    parser.add_argument("--buffer", type=float, default=0.25, help="Buffer duration in seconds (default: 0.25)")
+    parser.add_argument("--use-llm", action="store_true", help="Use LLM for paragraph inference (placeholder)")
+    parser.add_argument("--split", action="store_true", help="Split vocals from audio using Demucs")
+    parser.add_argument("--normalize", action="store_true", help="Normalize audio after splitting")
+
     args = parser.parse_args()
     folder_path = args.folder_path
-    model_name = args.model
+    buffer_duration = args.buffer
+    use_llm = args.use_llm
+    split_vocals = args.split
+    normalize_audio = args.normalize
+    model_name = "turbo"
 
     if not os.path.isdir(folder_path):
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
@@ -93,42 +145,118 @@ def main():
             audio_file_path = os.path.join(folder_path, filename)
             print(f"Transcribing: {audio_file_path}")
 
-            # Detect DTMF tones
-            dtmf_times = detect_dtmf(audio_file_path)
+            # --- Demucs Vocal Separation (if requested) ---
+            if split_vocals:
+                print(f"Splitting vocals for: {filename}")
+                try:
+                    # Run demucs.  Note:  We use --int24 for higher quality output.
+                    subprocess.run([
+                        "demucs",
+                        "--two-stems", "vocals",
+                        "-n", "htdemucs",
+                        "--int24",
+                        audio_file_path
+                    ], check=True)
 
-            # Transcribe audio file using Whisper API
-            result = model.transcribe(audio_file_path, verbose=False, word_timestamps=True)
+                    # Demucs output structure: separated/htdemucs/{filename}/{stem}.wav
+                    vocals_file_path = os.path.join("separated", "htdemucs", os.path.splitext(filename)[0], "vocals.wav")
 
-            # Prepare JSON output
+                    if not os.path.exists(vocals_file_path):
+                        print(f"Error: Vocal separation failed for {filename}.  Falling back to original audio.")
+                        vocals_file_path = audio_file_path  # Use original if separation fails
+                except FileNotFoundError:
+                    print("Error: demucs not found. Please ensure it's installed and in your PATH.")
+                    return
+                except subprocess.CalledProcessError as e:
+                    print(f"Error running demucs: {e}")
+                    return
+            else:
+                vocals_file_path = audio_file_path
+
+            # --- Load Audio (either original or separated vocals) ---
+            y, sr = librosa.load(vocals_file_path)
+
+            # --- Normalization (if requested) ---
+            if normalize_audio:
+                print(f"Normalizing audio for: {filename}")
+                y = librosa.util.normalize(y)
+
+            dtmf_times = detect_dtmf(vocals_file_path) # Use vocals file for DTMF
+            result = model.transcribe(vocals_file_path, verbose=False, word_timestamps=True) # and Whisper
+
+            base_filename = os.path.splitext(filename)[0]
+            first_few_words = "_".join(base_filename.split("_")[:3])
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir_name = f"{first_few_words}_{timestamp}"
+            output_dir_path = os.path.join(folder_path, output_dir_name)
+            sentences_dir_path = os.path.join(output_dir_path, "sentences")
+            paragraphs_dir_path = os.path.join(output_dir_path, "paragraphs")
+
+            os.makedirs(sentences_dir_path, exist_ok=True)
+            os.makedirs(paragraphs_dir_path, exist_ok=True)
+
+
+
+            # --- Sentence-level processing ---
+            sentence_counter = 1
+            for segment in result["segments"]:
+                start_time = segment["start"]
+                end_time = segment["end"]
+
+                # NO buffer added here
+
+                start_sample = int(start_time * sr)
+                end_sample = int(end_time * sr)
+                sentence_audio = y[start_sample:end_sample]
+
+                sentence_text = segment["text"]
+                sentence_filepath = generate_text_based_filename(sentence_text, sentence_counter, sentences_dir_path)
+                sf.write(sentence_filepath, sentence_audio, sr)
+                sentence_counter += 1
+
+            # --- Paragraph-level processing ---
+            paragraphs = infer_paragraphs(result["segments"], use_llm=use_llm)
+
+            paragraph_counter = 1
+            for paragraph_indices in paragraphs:
+                # Combine audio segments for the paragraph
+                paragraph_audio = np.array([], dtype=np.float32)
+                paragraph_text = "" # Accumulate text for filename
+                for i in paragraph_indices:
+                    segment = result["segments"][i]
+                    start_time = segment["start"]
+                    end_time = segment["end"]
+                    # NO buffer added here
+                    start_sample = int(start_time * sr)
+                    end_sample = int(end_time * sr)
+                    paragraph_audio = np.concatenate((paragraph_audio, y[start_sample:end_sample]))
+                    paragraph_text += segment["text"] + " " # Accumulate text
+
+                # Add buffer AFTER combining
+                end_time = min(librosa.get_duration(y=y, sr=sr), result["segments"][paragraph_indices[-1]]["end"] + buffer_duration)
+                end_sample = int(end_time * sr)
+                start_sample = int(result["segments"][paragraph_indices[0]]["start"] * sr)
+                paragraph_audio = y[start_sample:end_sample]
+
+
+                # Save paragraph audio
+                paragraph_filepath = generate_text_based_filename(paragraph_text, paragraph_counter, paragraphs_dir_path)
+                sf.write(paragraph_filepath, paragraph_audio, sr)
+                paragraph_counter += 1
+
             output_data = {
                 "transcription": result["text"],
-                "segments": [],
+                "segments": result["segments"],
                 "dtmf_tones": dtmf_times,
+                "paragraphs": paragraphs,
             }
 
-            for segment in result["segments"]:
-                segment_data = {
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "text": segment["text"],
-                    "words": [],
-                }
-                for word in segment["words"]:
-                    word_data = {
-                        "word": word["word"],
-                        "start": word["start"],
-                        "end": word["end"],
-                    }
-                    segment_data["words"].append(word_data)
-                output_data["segments"].append(segment_data)
-
-            # Save JSON output to a file
-            output_filename = os.path.splitext(filename)[0] + ".json"
-            output_path = os.path.join(folder_path, output_filename)
+            output_filename =  "transcription.json"
+            output_path = os.path.join(output_dir_path, output_filename)
             with open(output_path, "w") as outfile:
                 json.dump(output_data, outfile, indent=4)
 
-            print(f"Transcription saved to: {output_path}")
+            print(f"Transcription, sentence slices, and paragraph slices saved to: {output_dir_path}")
 
 if __name__ == "__main__":
     main()
