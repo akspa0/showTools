@@ -8,6 +8,7 @@ import datetime
 import soundfile as sf
 import re
 import subprocess
+import sqlite3
 
 def sanitize_filename(filename):
     """Sanitizes a filename by removing invalid characters."""
@@ -16,7 +17,8 @@ def sanitize_filename(filename):
 def generate_text_based_filename(text, counter, base_dir, extension=".wav"):
     """Generates a filename from text, counter, and base directory."""
     sanitized_text = sanitize_filename(text.strip().replace(" ", "_"))
-    truncated_text = sanitized_text[:128]
+    max_len = 40 - len(extension) - len(str(counter)) - 1  # Account for counter, extension, and separator
+    truncated_text = sanitized_text[:max_len]
     filename = f"{counter:04d}_{truncated_text}{extension}"
     return os.path.join(base_dir, filename)
 
@@ -116,6 +118,80 @@ def infer_paragraphs(segments, use_llm=False):
             paragraphs.append(current_paragraph)
     return paragraphs
 
+def create_database(db_path):
+    """Creates the SQLite database and tables."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            file_id INTEGER PRIMARY KEY,
+            filename TEXT,
+            original_filepath TEXT,
+            processed_date TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS paragraphs (
+            paragraph_id INTEGER PRIMARY KEY,
+            file_id INTEGER,
+            paragraph_filename TEXT,
+            paragraph_text TEXT,
+            FOREIGN KEY (file_id) REFERENCES files(file_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sentences (
+            sentence_id INTEGER PRIMARY KEY,
+            paragraph_id INTEGER,
+            sentence_filename TEXT,
+            sentence_text TEXT,
+            start_time REAL,
+            end_time REAL,
+            FOREIGN KEY (paragraph_id) REFERENCES paragraphs(paragraph_id)
+        )
+    """)
+    #  speakers and speaker_segments tables are created in diarize_audio.py
+
+    conn.commit()
+    conn.close()
+
+def insert_file_data(db_path, filename, original_filepath):
+    """Inserts file data into the database."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    processed_date = datetime.datetime.now().isoformat()
+    cursor.execute("INSERT INTO files (filename, original_filepath, processed_date) VALUES (?, ?, ?)",
+                   (filename, original_filepath, processed_date))
+    file_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return file_id
+
+def insert_paragraph_data(db_path, file_id, paragraph_filename, paragraph_text):
+    """Inserts paragraph data into the database."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO paragraphs (file_id, paragraph_filename, paragraph_text) VALUES (?, ?, ?)",
+                   (file_id, paragraph_filename, paragraph_text))
+    paragraph_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return paragraph_id
+
+def insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text, start_time, end_time):
+    """Inserts sentence data into the database."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO sentences (paragraph_id, sentence_filename, sentence_text, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+                   (paragraph_id, sentence_filename, sentence_text, start_time, end_time))
+    sentence_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return sentence_id
+
 def main():
     parser = argparse.ArgumentParser(description="Audio File Processor")
     parser.add_argument("folder_path", help="Path to the folder containing audio files")
@@ -123,6 +199,7 @@ def main():
     parser.add_argument("--use-llm", action="store_true", help="Use LLM for paragraph inference (placeholder)")
     parser.add_argument("--split", action="store_true", help="Split vocals from audio using Demucs")
     parser.add_argument("--normalize", action="store_true", help="Normalize audio after splitting")
+    parser.add_argument("--db_path", default="transcriptions.db", help="Path to the SQLite database file")
 
     args = parser.parse_args()
     folder_path = args.folder_path
@@ -130,11 +207,14 @@ def main():
     use_llm = args.use_llm
     split_vocals = args.split
     normalize_audio = args.normalize
+    db_path = args.db_path
     model_name = "turbo"
 
     if not os.path.isdir(folder_path):
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
         return
+
+    create_database(db_path) # Create database and tables
 
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
@@ -149,7 +229,7 @@ def main():
             if split_vocals:
                 print(f"Splitting vocals for: {filename}")
                 try:
-                    # Run demucs.  Note:  We use --int24 for higher quality output.
+                    # Run demucs.
                     subprocess.run([
                         "demucs",
                         "--two-stems", "vocals",
@@ -195,6 +275,8 @@ def main():
             os.makedirs(sentences_dir_path, exist_ok=True)
             os.makedirs(paragraphs_dir_path, exist_ok=True)
 
+            # --- Insert File Data ---
+            file_id = insert_file_data(db_path, filename, audio_file_path)
 
 
             # --- Sentence-level processing ---
@@ -210,9 +292,12 @@ def main():
                 sentence_audio = y[start_sample:end_sample]
 
                 sentence_text = segment["text"]
-                sentence_filepath = generate_text_based_filename(sentence_text, sentence_counter, sentences_dir_path)
-                sf.write(sentence_filepath, sentence_audio, sr)
+                sentence_filename = generate_text_based_filename(sentence_text, sentence_counter, sentences_dir_path)
+                sf.write(os.path.join(sentences_dir_path, sentence_filename), sentence_audio, sr)
                 sentence_counter += 1
+
+
+
 
             # --- Paragraph-level processing ---
             paragraphs = infer_paragraphs(result["segments"], use_llm=use_llm)
@@ -240,8 +325,26 @@ def main():
 
 
                 # Save paragraph audio
-                paragraph_filepath = generate_text_based_filename(paragraph_text, paragraph_counter, paragraphs_dir_path)
-                sf.write(paragraph_filepath, paragraph_audio, sr)
+                paragraph_filename = generate_text_based_filename(paragraph_text, paragraph_counter, paragraphs_dir_path)
+                sf.write(paragraph_filename, paragraph_audio, sr)
+
+                # --- Insert Paragraph Data ---
+                paragraph_id = insert_paragraph_data(db_path, file_id, paragraph_filename, paragraph_text)
+
+                # --- Insert Sentence Data ---
+                for i in paragraph_indices:
+                    segment = result["segments"][i]
+                    start_time = segment["start"]
+                    end_time = segment["end"]
+                    sentence_text = segment["text"]
+                    # Find corresponding sentence file:
+                    sentence_filename = ""
+                    for fname in os.listdir(sentences_dir_path):
+                        if fname.startswith(f"{i+1:04d}_"): # Find matching sentence number
+                            sentence_filename = fname
+                            break
+
+                    insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text, start_time, end_time)
                 paragraph_counter += 1
 
             output_data = {
