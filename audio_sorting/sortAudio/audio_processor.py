@@ -120,43 +120,49 @@ def infer_paragraphs(segments, use_llm=False):
 
 def create_database(db_path):
     """Creates the SQLite database and tables."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            file_id INTEGER PRIMARY KEY,
-            filename TEXT,
-            original_filepath TEXT,
-            processed_date TEXT
-        )
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                file_id INTEGER PRIMARY KEY,
+                filename TEXT,
+                original_filepath TEXT,
+                processed_date TEXT
+            )
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS paragraphs (
-            paragraph_id INTEGER PRIMARY KEY,
-            file_id INTEGER,
-            paragraph_filename TEXT,
-            paragraph_text TEXT,
-            FOREIGN KEY (file_id) REFERENCES files(file_id)
-        )
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paragraphs (
+                paragraph_id INTEGER PRIMARY KEY,
+                file_id INTEGER,
+                paragraph_filename TEXT,
+                paragraph_text TEXT,
+                FOREIGN KEY (file_id) REFERENCES files(file_id)
+            )
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sentences (
-            sentence_id INTEGER PRIMARY KEY,
-            paragraph_id INTEGER,
-            sentence_filename TEXT,
-            sentence_text TEXT,
-            start_time REAL,
-            end_time REAL,
-            FOREIGN KEY (paragraph_id) REFERENCES paragraphs(paragraph_id)
-        )
-    """)
-    #  speakers and speaker_segments tables are created in diarize_audio.py
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sentences (
+                sentence_id INTEGER PRIMARY KEY,
+                paragraph_id INTEGER,
+                sentence_filename TEXT,
+                sentence_text TEXT,
+                start_time REAL,
+                end_time REAL,
+                FOREIGN KEY (paragraph_id) REFERENCES paragraphs(paragraph_id)
+            )
+        """)
+        #  speakers and speaker_segments tables are created in diarize_audio.py
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+        print(f"Database created/connected successfully at: {db_path}")
+    except sqlite3.Error as e:
+        print(f"Error creating database: {e}")
+        exit(1) # Exit if database creation fails
+
 
 def insert_file_data(db_path, filename, original_filepath, processed_date):
     """Inserts file data into the database."""
@@ -212,10 +218,8 @@ def main():
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
         return
 
-    create_database(db_path)  # Create database and tables
     create_database(db_path) # Create database and tables
 
-    print(f"Loading Whisper model: {model_name}")
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
 
@@ -275,15 +279,14 @@ def main():
                 print(f"Normalizing audio for: {filename}")
                 y = librosa.util.normalize(y)
 
-            processed_date = datetime.datetime.now().isoformat()
             dtmf_times = detect_dtmf(vocals_file_path) # Use vocals file for DTMF
-            file_id = insert_file_data(db_path, filename, audio_file_path, processed_date)
             result = model.transcribe(vocals_file_path, verbose=False, word_timestamps=True) # and Whisper
 
 
 
             # --- Insert File Data ---
-            file_id = insert_file_data(db_path, filename, audio_file_path)
+            processed_date = datetime.datetime.now().isoformat()
+            file_id = insert_file_data(db_path, filename, audio_file_path, processed_date)
 
 
             # --- Sentence-level processing ---
