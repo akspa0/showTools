@@ -211,14 +211,12 @@ def main():
     use_llm = args.use_llm
     split_vocals = args.split
     normalize_audio = args.normalize
-    db_path = args.db_path
+    db_path = args.db_path  # This will now be a *relative* path
     model_name = "turbo"
 
     if not os.path.isdir(folder_path):
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
         return
-
-    create_database(db_path) # Create database and tables
 
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
@@ -238,6 +236,10 @@ def main():
 
             os.makedirs(sentences_dir_path, exist_ok=True)
             os.makedirs(paragraphs_dir_path, exist_ok=True)
+            
+            # Create database and tables *within* the output directory
+            db_path_full = os.path.join(output_dir_path, db_path)  # Use the output_dir
+            create_database(db_path_full)
 
             # --- Demucs Vocal Separation (if requested) ---
             if split_vocals:
@@ -286,7 +288,7 @@ def main():
 
             # --- Insert File Data ---
             processed_date = datetime.datetime.now().isoformat()
-            file_id = insert_file_data(db_path, filename, audio_file_path, processed_date)
+            file_id = insert_file_data(db_path_full, filename, audio_file_path, processed_date) # Use db_path_full
 
 
             # --- Sentence-level processing ---
@@ -303,7 +305,7 @@ def main():
 
                 sentence_text = segment["text"]
                 sentence_filename = generate_text_based_filename(sentence_text, sentence_counter, sentences_dir_path)
-                sf.write(os.path.join(sentences_dir_path, sentence_filename), sentence_audio, sr)
+                sf.write(os.path.join(sentences_dir_path, sentence_filename), sentence_audio, sr, subtype='PCM_16') # Use 16-bit PCM
                 sentence_counter += 1
 
 
@@ -336,10 +338,10 @@ def main():
 
                 # Save paragraph audio
                 paragraph_filename = generate_text_based_filename(paragraph_text, paragraph_counter, paragraphs_dir_path)
-                sf.write(paragraph_filename, paragraph_audio, sr)
+                sf.write(paragraph_filename, paragraph_audio, sr, subtype='PCM_16') # Use 16-bit PCM
 
                 # --- Insert Paragraph Data ---
-                paragraph_id = insert_paragraph_data(db_path, file_id, paragraph_filename, paragraph_text)
+                paragraph_id = insert_paragraph_data(db_path_full, file_id, paragraph_filename, paragraph_text) # Use db_path_full
 
                 # --- Insert Sentence Data ---
                 for i in paragraph_indices:
@@ -354,7 +356,7 @@ def main():
                             sentence_filename = fname
                             break
 
-                    insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text, start_time, end_time)
+                    insert_sentence_data(db_path_full, paragraph_id, sentence_filename, sentence_text, start_time, end_time) #Use db_path_full
                 paragraph_counter += 1
 
             output_data = {

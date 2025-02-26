@@ -78,13 +78,13 @@ def insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text
 
 def main():
     parser = argparse.ArgumentParser(description="Convert JSON output from audio_processor.py to SQLite database.")
-    parser.add_argument("input_dir", help="Path to the output directory of audio_processor.py")
+    parser.add_argument("input_dir", help="Path to the parent directory containing audio_processor.py output directories")
     parser.add_argument("--db_path", default="transcriptions.db", help="Path to the SQLite database file")
     args = parser.parse_args()
     input_dir = args.input_dir
     db_path = args.db_path
 
-    create_database(db_path)
+    
 
     for output_dir in os.listdir(input_dir):
         output_dir_path = os.path.join(input_dir, output_dir)
@@ -92,6 +92,11 @@ def main():
             json_path = os.path.join(output_dir_path, "transcription.json")
             if os.path.exists(json_path):
                 print(f"Processing: {json_path}")
+                
+                # Create/connect to DB *within* the output_dir
+                db_path_full = os.path.join(output_dir_path, db_path)
+                create_database(db_path_full)
+                
                 with open(json_path, "r") as f:
                     data = json.load(f)
 
@@ -108,7 +113,7 @@ def main():
                     processed_date = datetime.datetime.now().isoformat()
 
 
-                file_id = insert_file_data(db_path, original_filename, original_filepath, processed_date)
+                file_id = insert_file_data(db_path_full, original_filename, original_filepath, processed_date)
 
                 # Process paragraphs and sentences
                 if "paragraphs" in data and isinstance(data["paragraphs"], list):
@@ -118,10 +123,10 @@ def main():
                             if isinstance(data["segments"], list) and len(data["segments"]) > sentence_index:
                                 paragraph_text += data["segments"][sentence_index]["text"] + " "
                         
-                        # Construct paragraph filename based on index
-                        paragraph_filename = f"{i+1:04d}.wav" #This will not match the actual filename, but we need something
+                        # Use paragraph index as filename
+                        paragraph_filename = f"paragraph_{i+1:04d}.wav"
 
-                        paragraph_id = insert_paragraph_data(db_path, file_id, paragraph_filename, paragraph_text.strip())
+                        paragraph_id = insert_paragraph_data(db_path_full, file_id, paragraph_filename, paragraph_text.strip())
 
                         for j in paragraph_indices:
                             if isinstance(data["segments"], list) and len(data["segments"]) > j:
@@ -129,10 +134,10 @@ def main():
                                 sentence_text = segment["text"]
                                 start_time = segment["start"]
                                 end_time = segment["end"]
-                                # Construct sentence filename based on index within paragraph
-                                sentence_filename = f"{j+1:04d}.wav" #This will not match
+                                # Use segment index as filename
+                                sentence_filename = f"sentence_{j+1:04d}.wav"
 
-                                insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text, start_time, end_time)
+                                insert_sentence_data(db_path_full, paragraph_id, sentence_filename, sentence_text, start_time, end_time)
             else:
                 print(f"Skipping: {output_dir_path} (no transcription.json found)")
 
