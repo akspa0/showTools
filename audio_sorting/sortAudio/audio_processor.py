@@ -158,11 +158,10 @@ def create_database(db_path):
     conn.commit()
     conn.close()
 
-def insert_file_data(db_path, filename, original_filepath):
+def insert_file_data(db_path, filename, original_filepath, processed_date):
     """Inserts file data into the database."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    processed_date = datetime.datetime.now().isoformat()
     cursor.execute("INSERT INTO files (filename, original_filepath, processed_date) VALUES (?, ?, ?)",
                    (filename, original_filepath, processed_date))
     file_id = cursor.lastrowid
@@ -187,10 +186,9 @@ def insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text
     cursor = conn.cursor()
     cursor.execute("INSERT INTO sentences (paragraph_id, sentence_filename, sentence_text, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
                    (paragraph_id, sentence_filename, sentence_text, start_time, end_time))
-    sentence_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    return sentence_id
+
 
 def main():
     parser = argparse.ArgumentParser(description="Audio File Processor")
@@ -214,8 +212,10 @@ def main():
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
         return
 
+    create_database(db_path)  # Create database and tables
     create_database(db_path) # Create database and tables
 
+    print(f"Loading Whisper model: {model_name}")
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
 
@@ -225,21 +225,35 @@ def main():
             audio_file_path = os.path.join(folder_path, filename)
             print(f"Transcribing: {audio_file_path}")
 
+            base_filename = os.path.splitext(filename)[0]
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir_name = f"{'_'.join(base_filename.split('_')[:3])}_{timestamp}"
+            output_dir_path = os.path.join(folder_path, output_dir_name)
+            sentences_dir_path = os.path.join(output_dir_path, "sentences")
+            paragraphs_dir_path = os.path.join(output_dir_path, "paragraphs")
+
+            os.makedirs(sentences_dir_path, exist_ok=True)
+            os.makedirs(paragraphs_dir_path, exist_ok=True)
+
             # --- Demucs Vocal Separation (if requested) ---
             if split_vocals:
                 print(f"Splitting vocals for: {filename}")
+                # Create a 'separated' subdirectory within the output directory
+                separated_dir = os.path.join(output_dir_path, "separated")
+                os.makedirs(separated_dir, exist_ok=True)  # Ensure 'separated' dir exists
                 try:
-                    # Run demucs.
+                    # Run demucs, specifying the output directory
                     subprocess.run([
                         "demucs",
                         "--two-stems", "vocals",
                         "-n", "htdemucs",
                         "--int24",
+                        "-o", separated_dir,  # Output to the 'separated' dir
                         audio_file_path
                     ], check=True)
 
-                    # Demucs output structure: separated/htdemucs/{filename}/{stem}.wav
-                    vocals_file_path = os.path.join("separated", "htdemucs", os.path.splitext(filename)[0], "vocals.wav")
+                    # Demucs output structure: {output_dir}/separated/htdemucs/{filename}/{stem}.wav
+                    vocals_file_path = os.path.join(separated_dir, "htdemucs", base_filename, "vocals.wav")
 
                     if not os.path.exists(vocals_file_path):
                         print(f"Error: Vocal separation failed for {filename}.  Falling back to original audio.")
@@ -261,19 +275,12 @@ def main():
                 print(f"Normalizing audio for: {filename}")
                 y = librosa.util.normalize(y)
 
+            processed_date = datetime.datetime.now().isoformat()
             dtmf_times = detect_dtmf(vocals_file_path) # Use vocals file for DTMF
+            file_id = insert_file_data(db_path, filename, audio_file_path, processed_date)
             result = model.transcribe(vocals_file_path, verbose=False, word_timestamps=True) # and Whisper
 
-            base_filename = os.path.splitext(filename)[0]
-            first_few_words = "_".join(base_filename.split("_")[:3])
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir_name = f"{first_few_words}_{timestamp}"
-            output_dir_path = os.path.join(folder_path, output_dir_name)
-            sentences_dir_path = os.path.join(output_dir_path, "sentences")
-            paragraphs_dir_path = os.path.join(output_dir_path, "paragraphs")
 
-            os.makedirs(sentences_dir_path, exist_ok=True)
-            os.makedirs(paragraphs_dir_path, exist_ok=True)
 
             # --- Insert File Data ---
             file_id = insert_file_data(db_path, filename, audio_file_path)
