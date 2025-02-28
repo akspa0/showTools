@@ -88,8 +88,8 @@ def query_local_llm(prompt):
     print("Warning: Local LLM integration is not yet implemented.")
     return []  # Return an empty list as a placeholder.
 
-def infer_paragraphs(segments, use_llm=False):
-    """Infers paragraph boundaries from sentence segments."""
+def infer_paragraphs(segments, dtmf_times, use_llm=False):
+    """Infers paragraph boundaries from sentence segments, prioritizing DTMF tones."""
     if use_llm:
         # Construct a prompt for the LLM.
         prompt = "Identify the paragraph breaks in the following text:\n\n"
@@ -99,71 +99,90 @@ def infer_paragraphs(segments, use_llm=False):
         paragraph_indices = query_local_llm(prompt)
         if paragraph_indices:
             return paragraph_indices
-        # else, fall through to the heuristic
+        # else, fall through to the heuristic/dtmf logic
 
-    # Simple heuristic: group sentences with short pauses between them.
     paragraphs = []
     current_paragraph = []
-    if segments:
-      current_paragraph.append(0)
-      paragraphs.append(current_paragraph)
+    if not segments:
+        return paragraphs
+
+    current_paragraph.append(0)
+    paragraphs.append(current_paragraph)
 
     for i in range(len(segments) - 1):
         current_end = segments[i]["end"]
         next_start = segments[i+1]["start"]
-        if next_start - current_end < 1.0:
-            current_paragraph.append(i + 1)
-        else:
+        
+        # Check for DTMF tones near the sentence boundary
+        dtmf_break = False
+        for start, end in dtmf_times:
+            # If a DTMF tone starts within 0.5 seconds of the end of the current sentence
+            # or the start of the next sentence, consider it a paragraph break.
+            if (abs(start - current_end) < 0.5) or (abs(start - next_start) < 0.5):
+                dtmf_break = True
+                break
+
+        if dtmf_break or (next_start - current_end >= 1.0):  # DTMF or long pause
             current_paragraph = [i + 1]
             paragraphs.append(current_paragraph)
+        else:
+            current_paragraph.append(i + 1)
+            
     return paragraphs
 
 def create_database(db_path):
     """Creates the SQLite database and tables."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                file_id INTEGER PRIMARY KEY,
+                filename TEXT,
+                original_filepath TEXT,
+                processed_date TEXT,
+                metadata TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paragraphs (
+                paragraph_id INTEGER PRIMARY KEY,
+                file_id INTEGER,
+                paragraph_filename TEXT,
+                paragraph_text TEXT,
+                FOREIGN KEY (file_id) REFERENCES files(file_id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sentences (
+                sentence_id INTEGER PRIMARY KEY,
+                paragraph_id INTEGER,
+                sentence_filename TEXT,
+                sentence_text TEXT,
+                start_time REAL,
+                end_time REAL,
+                FOREIGN KEY (paragraph_id) REFERENCES paragraphs(paragraph_id)
+            )
+        """)
+        #  speakers and speaker_segments tables are created in diarize_audio.py
+
+        conn.commit()
+        conn.close()
+        print(f"Database created/connected successfully at: {db_path}")
+    except sqlite3.Error as e:
+        print(f"Error creating database: {e}")
+        exit(1) # Exit if database creation fails
+
+
+def insert_file_data(db_path, filename, original_filepath, processed_date, metadata_json):
+    """Inserts file data into the database, including metadata."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            file_id INTEGER PRIMARY KEY,
-            filename TEXT,
-            original_filepath TEXT,
-            processed_date TEXT
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS paragraphs (
-            paragraph_id INTEGER PRIMARY KEY,
-            file_id INTEGER,
-            paragraph_filename TEXT,
-            paragraph_text TEXT,
-            FOREIGN KEY (file_id) REFERENCES files(file_id)
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sentences (
-            sentence_id INTEGER PRIMARY KEY,
-            paragraph_id INTEGER,
-            sentence_filename TEXT,
-            sentence_text TEXT,
-            start_time REAL,
-            end_time REAL,
-            FOREIGN KEY (paragraph_id) REFERENCES paragraphs(paragraph_id)
-        )
-    """)
-    #  speakers and speaker_segments tables are created in diarize_audio.py
-
-    conn.commit()
-    conn.close()
-
-def insert_file_data(db_path, filename, original_filepath, processed_date):
-    """Inserts file data into the database."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO files (filename, original_filepath, processed_date) VALUES (?, ?, ?)",
-                   (filename, original_filepath, processed_date))
+    cursor.execute("INSERT INTO files (filename, original_filepath, processed_date, metadata) VALUES (?, ?, ?, ?)",
+                   (filename, original_filepath, processed_date, metadata_json))
     file_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -205,17 +224,14 @@ def main():
     use_llm = args.use_llm
     split_vocals = args.split
     normalize_audio = args.normalize
-    db_path = args.db_path
+    db_path = args.db_path  # This will now be a *relative* path
     model_name = "turbo"
 
     if not os.path.isdir(folder_path):
         print(f"Error: Folder path '{folder_path}' is not a valid directory.")
         return
 
-    create_database(db_path)  # Create database and tables
-    create_database(db_path) # Create database and tables
 
-    print(f"Loading Whisper model: {model_name}")
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
 
@@ -234,6 +250,21 @@ def main():
 
             os.makedirs(sentences_dir_path, exist_ok=True)
             os.makedirs(paragraphs_dir_path, exist_ok=True)
+
+            # Create database and tables *within* the output directory
+            db_path_full = os.path.join(output_dir_path, db_path)  # Use the output_dir
+            create_database(db_path_full)
+
+            # --- Load Original Audio and Extract Metadata ---
+            y, sr = librosa.load(audio_file_path)
+            #  Extract metadata using librosa (limited, consider other libraries for more robust support)
+            metadata = {}
+            try:
+                metadata = librosa.feature.metadata(y=y, sr=sr) # type: ignore
+            except Exception as e:
+                print(f"Error extracting metadata: {e}")
+            metadata_json = json.dumps(metadata)
+
 
             # --- Demucs Vocal Separation (if requested) ---
             if split_vocals:
@@ -267,23 +298,24 @@ def main():
             else:
                 vocals_file_path = audio_file_path
 
-            # --- Load Audio (either original or separated vocals) ---
-            y, sr = librosa.load(vocals_file_path)
+            # --- Load Separated/Original Audio for Processing ---
+            # If split, use vocals_file_path; otherwise, use original y, sr from librosa.load
+            if split_vocals:
+              y, sr = librosa.load(vocals_file_path) # Load *separated* audio for slicing
 
             # --- Normalization (if requested) ---
             if normalize_audio:
                 print(f"Normalizing audio for: {filename}")
-                y = librosa.util.normalize(y)
+                y = librosa.util.normalize(y) # Normalize the (potentially separated) audio
 
-            processed_date = datetime.datetime.now().isoformat()
-            dtmf_times = detect_dtmf(vocals_file_path) # Use vocals file for DTMF
-            file_id = insert_file_data(db_path, filename, audio_file_path, processed_date)
-            result = model.transcribe(vocals_file_path, verbose=False, word_timestamps=True) # and Whisper
+            dtmf_times = detect_dtmf(audio_file_path) # Use original file for DTMF
+            result = model.transcribe(audio_file_path, verbose=False, word_timestamps=True) # and Whisper on original
 
 
 
             # --- Insert File Data ---
-            file_id = insert_file_data(db_path, filename, audio_file_path)
+            processed_date = datetime.datetime.now().isoformat()
+            file_id = insert_file_data(db_path_full, filename, audio_file_path, processed_date, metadata_json) # Use db_path_full
 
 
             # --- Sentence-level processing ---
@@ -300,14 +332,14 @@ def main():
 
                 sentence_text = segment["text"]
                 sentence_filename = generate_text_based_filename(sentence_text, sentence_counter, sentences_dir_path)
-                sf.write(os.path.join(sentences_dir_path, sentence_filename), sentence_audio, sr)
+                sf.write(os.path.join(sentences_dir_path, sentence_filename), sentence_audio, sr, subtype='PCM_16') # Use 16-bit PCM
                 sentence_counter += 1
 
 
 
 
             # --- Paragraph-level processing ---
-            paragraphs = infer_paragraphs(result["segments"], use_llm=use_llm)
+            paragraphs = infer_paragraphs(result["segments"], dtmf_times, use_llm=use_llm)
 
             paragraph_counter = 1
             for paragraph_indices in paragraphs:
@@ -333,10 +365,10 @@ def main():
 
                 # Save paragraph audio
                 paragraph_filename = generate_text_based_filename(paragraph_text, paragraph_counter, paragraphs_dir_path)
-                sf.write(paragraph_filename, paragraph_audio, sr)
+                sf.write(paragraph_filename, paragraph_audio, sr, subtype='PCM_16') # Use 16-bit PCM
 
                 # --- Insert Paragraph Data ---
-                paragraph_id = insert_paragraph_data(db_path, file_id, paragraph_filename, paragraph_text)
+                paragraph_id = insert_paragraph_data(db_path_full, file_id, paragraph_filename, paragraph_text) # Use db_path_full
 
                 # --- Insert Sentence Data ---
                 for i in paragraph_indices:
@@ -351,7 +383,7 @@ def main():
                             sentence_filename = fname
                             break
 
-                    insert_sentence_data(db_path, paragraph_id, sentence_filename, sentence_text, start_time, end_time)
+                    insert_sentence_data(db_path_full, paragraph_id, sentence_filename, sentence_text, start_time, end_time) #Use db_path_full
                 paragraph_counter += 1
 
             output_data = {
@@ -359,6 +391,7 @@ def main():
                 "segments": result["segments"],
                 "dtmf_tones": dtmf_times,
                 "paragraphs": paragraphs,
+                "metadata": metadata, # Include metadata in JSON
             }
 
             output_filename =  "transcription.json"

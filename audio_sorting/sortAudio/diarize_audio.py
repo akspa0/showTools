@@ -128,7 +128,7 @@ def main():
     args = parser.parse_args()
     input_dir = args.input_dir
     model_name = args.model
-    db_path = args.db_path # Use the provided db_path
+    db_path = args.db_path  # Keep db_path as an argument
 
     paragraphs_dir = os.path.join(input_dir, "paragraphs")
     speakers_dir = os.path.join(input_dir, "speakers") # Output in original directory
@@ -152,25 +152,26 @@ def main():
 
     # --- Database Handling ---
     temp_db = False
-    if not os.path.exists(db_path):
-        print(f"Warning: Database file '{db_path}' not found.  Using temporary database.")
+    db_path_full = os.path.join(input_dir, db_path) # Use the input_dir for the db
+    if not os.path.exists(db_path_full):
+        print(f"Warning: Database file '{db_path_full}' not found.  Using temporary database.")
         temp_db = True
-        db_path = os.path.join(input_dir, "diarization_only.db") # Use a temporary DB in the output dir
-        create_temp_speaker_tables(db_path)
+        db_path_full = os.path.join(input_dir, "diarization_only.db") # Use a temporary DB in the output dir
+        create_temp_speaker_tables(db_path_full)
     else:
         # Check if the 'paragraphs' table exists
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path_full)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='paragraphs'")
         table_exists = cursor.fetchone()
         conn.close()
         if not table_exists:
-            print(f"Warning: 'paragraphs' table not found in '{db_path}'. Using temporary database.")
+            print(f"Warning: 'paragraphs' table not found in '{db_path_full}'. Using temporary database.")
             temp_db = True
-            db_path = os.path.join(input_dir, "diarization_only.db")
-            create_temp_speaker_tables(db_path)
+            db_path_full = os.path.join(input_dir, "diarization_only.db")
+            create_temp_speaker_tables(db_path_full)
         else:
-            create_speaker_tables(db_path) # Ensure tables exist
+            create_speaker_tables(db_path_full) # Ensure tables exist
 
 
     for filename in os.listdir(paragraphs_dir):
@@ -192,7 +193,7 @@ def main():
                 }
 
             # Get paragraph_id for database insertion (only if not using temp db)
-            paragraph_id = None if temp_db else get_paragraph_id(db_path, filename)
+            paragraph_id = None if temp_db else get_paragraph_id(db_path_full, filename) # Use db_path_full
             if paragraph_id is None and not temp_db:
                 print(f"Error: Could not find paragraph_id for {filename}")
                 continue # Skip this file
@@ -222,15 +223,15 @@ def main():
 
                     segment_filepath = os.path.join(speakers_dir if temp_db else speaker_dir_data["dir"], segment_filename)
 
-                    sf.write(segment_filepath, speaker_audio, sr) #Save the audio
+                    sf.write(segment_filepath, speaker_audio, sr, subtype='PCM_16') # Use 16-bit PCM
 
                     # --- Database operations ---
-                    speaker_id = insert_speaker(db_path, speaker, temp_db=temp_db) # Insert speaker and get ID
-                    insert_speaker_segment(db_path, filename if temp_db else paragraph_id, speaker_id, segment_filename, segment_text, start_time, end_time, temp_db=temp_db)
+                    speaker_id = insert_speaker(db_path_full, speaker, temp_db=temp_db) # Insert speaker and get ID, use db_path_full
+                    insert_speaker_segment(db_path_full, filename if temp_db else paragraph_id, speaker_id, segment_filename, segment_text, start_time, end_time, temp_db=temp_db) # Use db_path_full
 
                     segment_counter += 1
 
-    print(f"Diarization and re-transcription complete. Results saved to database: {db_path}")
+    print(f"Diarization and re-transcription complete. Results saved to database: {db_path_full}")
 
 if __name__ == "__main__":
     main()
