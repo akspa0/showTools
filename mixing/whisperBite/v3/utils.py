@@ -66,18 +66,17 @@ def zip_results(output_dir, input_filename):
         
         # Add speaker transcripts
         for item in os.listdir(output_dir):
-            if item.startswith("Speaker_") and item.endswith("_full_transcript.txt"):
+            if item.endswith("_full_transcript.txt"):
+                full_path = os.path.join(output_dir, item)
+                zipf.write(full_path, item)
+            elif item.endswith("word_timings.json"):
                 full_path = os.path.join(output_dir, item)
                 zipf.write(full_path, item)
         
-        # Add individual transcriptions and their audio files
+        # Add transcription files and audio files
         for root, dirs, files in os.walk(output_dir):
-            # Skip processing directories
-            if any(x in root for x in ["normalized", "demucs", "speakers"]):
-                continue
-                
-            # Include transcriptions directories
-            if "_transcriptions" in root:
+            # Include all files in _transcriptions and _words directories
+            if "_transcriptions" in root or "_words" in root:
                 for file in files:
                     full_path = os.path.join(root, file)
                     
@@ -88,39 +87,47 @@ def zip_results(output_dir, input_filename):
                     if file.endswith(".txt"):
                         zipf.write(full_path, relative_path)
                     
-                    # Convert WAV to MP3 for audio files to save space
+                    # Add .wav files directly or convert to MP3
                     elif file.endswith(".wav"):
                         try:
-                            mp3_file = os.path.splitext(full_path)[0] + ".mp3"
-                            audio = AudioSegment.from_file(full_path)
-                            audio.export(mp3_file, format="mp3", bitrate="128k")
-                            
-                            # Add MP3 to the zip with the same relative path but different extension
-                            mp3_relative_path = os.path.splitext(relative_path)[0] + ".mp3"
-                            zipf.write(mp3_file, mp3_relative_path)
-                            
-                            # Clean up the MP3 file after adding to zip
-                            os.remove(mp3_file)
+                            # For word files, add WAV directly to save time
+                            if "_words" in root:
+                                zipf.write(full_path, relative_path)
+                            else:
+                                # For larger segment files, convert to MP3
+                                mp3_file = os.path.splitext(full_path)[0] + ".mp3"
+                                audio = AudioSegment.from_file(full_path)
+                                audio.export(mp3_file, format="mp3", bitrate="128k")
+                                
+                                # Add MP3 to the zip
+                                mp3_relative_path = os.path.splitext(relative_path)[0] + ".mp3"
+                                zipf.write(mp3_file, mp3_relative_path)
+                                
+                                # Clean up the MP3 file after adding to zip
+                                os.remove(mp3_file)
                         except Exception as e:
-                            logging.warning(f"Error converting {file} to MP3: {e}. Adding WAV instead.")
+                            logging.warning(f"Error with audio file {file}: {e}. Adding directly.")
                             zipf.write(full_path, relative_path)
-        
-        # Add segment information JSON
-        segments_json = os.path.join(output_dir, "speakers", "segments.json")
-        if os.path.exists(segments_json):
-            zipf.write(segments_json, "segments.json")
             
         # Create a metadata.json file with processing information
         metadata = {
             "source_file": os.path.basename(input_filename),
             "processing_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "num_speakers": len([d for d in os.listdir(output_dir) if d.startswith("Speaker_") and d.endswith("_full_transcript.txt")]),
+            "num_speakers": len([d for d in os.listdir(output_dir) if d.endswith("_full_transcript.txt")]),
+            "contents": {
+                "transcriptions": True,
+                "word_clips": "_words" in " ".join(os.listdir(output_dir)),
+                "master_transcript": os.path.exists(master_transcript)
+            }
         }
         
         # Add metadata to zip
         from io import BytesIO
         metadata_bytes = BytesIO(json.dumps(metadata, indent=2).encode('utf-8'))
         zipf.writestr("metadata.json", metadata_bytes.getvalue())
+
+    logging.info(f"Results zipped into: {zip_filename}")
+    return zip_filename
 
     logging.info(f"Results zipped into: {zip_filename}")
     return zip_filename

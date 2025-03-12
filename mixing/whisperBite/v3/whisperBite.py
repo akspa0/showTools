@@ -109,6 +109,7 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
     # Create speaker directories and slice audio
     speaker_files = {}
     segment_info = {}
+    segment_counter = 0
     
     for speaker, segments in speaker_segments.items():
         speaker_dir = os.path.join(speaker_output_dir, f"Speaker_{speaker}")
@@ -146,8 +147,8 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
             fade_duration = min(100, segment_audio.duration_seconds * 1000 / 4)  # 100ms or 1/4 of segment
             segment_audio = segment_audio.fade_in(int(fade_duration)).fade_out(int(fade_duration))
             
-            # Format: Speaker_X/segment_START_END_DURATION.wav
-            segment_filename = f"segment_{int(segment['start'])}_{int(segment['end'])}_{int(segment['duration'])}.wav"
+            # Format: Speaker_X/0000_segment_START_END_DURATION.wav
+            segment_filename = f"{segment_counter:04d}_segment_{int(segment['start'])}_{int(segment['end'])}_{int(segment['duration'])}.wav"
             segment_path = os.path.join(speaker_dir, segment_filename)
             
             # Export with normalized volume
@@ -158,8 +159,11 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
                 'path': segment_path,
                 'start': segment['start'],
                 'end': segment['end'],
-                'duration': segment['duration']
+                'duration': segment['duration'],
+                'sequence': segment_counter
             })
+            
+            segment_counter += 1
             
     # Create a JSON file with all segment information (useful for debugging/analytics)
     with open(os.path.join(speaker_output_dir, "segments.json"), 'w') as f:
@@ -170,37 +174,116 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
 def transcribe_with_whisper(model, speaker_files, output_dir):
     """Transcribe audio files using Whisper and create per-speaker transcripts."""
     all_transcriptions = {}
+    word_timings = {}
+    word_counter = 0
     
     for speaker, segments in speaker_files.items():
         speaker_transcription_dir = os.path.join(output_dir, f"Speaker_{speaker}_transcriptions")
         os.makedirs(speaker_transcription_dir, exist_ok=True)
         
+        # Create words directory for this speaker
+        words_dir = os.path.join(output_dir, f"Speaker_{speaker}_words")
+        os.makedirs(words_dir, exist_ok=True)
+        
         speaker_full_transcript = ""
         segment_transcriptions = []
         
-        # Sort segments by filename (which contains start time)
-        segments.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
+        # Sort segments by sequence number in filename
+        segments.sort(key=lambda x: int(os.path.basename(x).split('_')[0]))
         
         for segment_path in segments:
             try:
-                # Get timing info from filename
+                # Get info from filename
                 segment_name = os.path.basename(segment_path)
-                start_time, end_time, duration = map(int, segment_name.replace("segment_", "").replace(".wav", "").split("_"))
+                parts = segment_name.split('_')
+                
+                # Parse sequence number and timing info
+                try:
+                    seq_num = int(parts[0])
+                    
+                    # Extract timing information - handle different filename formats
+                    if len(parts) >= 5 and parts[1] == "segment":
+                        # Format: 0000_segment_START_END_DURATION.wav
+                        start_time = int(parts[2])
+                        end_time = int(parts[3])
+                        # Get duration without the .wav extension
+                        duration_str = parts[4].split('.')[0]
+                        duration = int(duration_str)
+                    else:
+                        # Fallback if filename format is unexpected
+                        logging.warning(f"Unexpected filename format: {segment_name}, using defaults")
+                        start_time = 0
+                        end_time = 10
+                        duration = 10
+                except (ValueError, IndexError) as e:
+                    logging.warning(f"Error parsing filename {segment_name}: {e}, using defaults")
+                    seq_num = 0
+                    start_time = 0
+                    end_time = 10
+                    duration = 10
+                start_time = int(segment_name.split('_')[2])
                 
                 # Skip very short segments that likely won't transcribe well
                 if duration < 1:
                     continue
                 
-                # Transcribe the segment
-                transcription = model.transcribe(segment_path)
+                # Transcribe the segment with word timestamps
+                transcription = model.transcribe(segment_path, word_timestamps=True)
                 text = transcription['text'].strip()
                 
                 if not text:
                     continue
-                    
-                # Create a reasonable output filename based on the first few words
+                
+                # Extract word timings
+                if 'segments' in transcription and transcription['segments']:
+                    for segment in transcription['segments']:
+                        if 'words' in segment:
+                            audio = AudioSegment.from_file(segment_path)
+                            
+                            for word_data in segment['words']:
+                                word = word_data['word'].strip()
+                                if not word:
+                                    continue
+                                    
+                                # Get word timing
+                                word_start = word_data['start']
+                                word_end = word_data['end']
+                                word_duration = word_end - word_start
+                                
+                                # Skip very short words
+                                if word_duration < 0.1:
+                                    continue
+                                    
+                                # Extract word audio
+                                word_audio = audio[word_start * 1000:word_end * 1000]
+                                
+                                # Apply fade in/out
+                                fade_ms = min(30, int(word_duration * 1000 / 3))
+                                word_audio = word_audio.fade_in(fade_ms).fade_out(fade_ms)
+                                
+                                # Save word audio
+                                word_filename = f"{word_counter:04d}_{word.replace(' ', '_')}.wav"
+                                word_path = os.path.join(words_dir, word_filename)
+                                word_audio.export(word_path, format="wav")
+                                
+                                # Store word timing info
+                                if speaker not in word_timings:
+                                    word_timings[speaker] = []
+                                    
+                                word_timings[speaker].append({
+                                    'word': word,
+                                    'file': word_path,
+                                    'start': start_time + word_start,
+                                    'end': start_time + word_end,
+                                    'duration': word_duration,
+                                    'sequence': word_counter
+                                })
+                                
+                                word_counter += 1
+                
+                # Create a reasonable output filename based on the first few words and sequence
                 first_words = text.split()[:5]
-                base_name = sanitize_filename("_".join(first_words))
+                base_name = f"{seq_num:04d}_{sanitize_filename('_'.join(first_words))}"
                 
                 # Create output paths
                 transcription_file = os.path.join(speaker_transcription_dir, f"{base_name}.txt")
@@ -225,7 +308,8 @@ def transcribe_with_whisper(model, speaker_files, output_dir):
                     'end': end_time,
                     'text': text,
                     'audio_file': audio_output_file,
-                    'transcript_file': transcription_file
+                    'transcript_file': transcription_file,
+                    'sequence': seq_num
                 })
                 
             except Exception as e:
@@ -240,19 +324,23 @@ def transcribe_with_whisper(model, speaker_files, output_dir):
         
         all_transcriptions[speaker] = segment_transcriptions
     
+    # Save word timings to JSON
+    with open(os.path.join(output_dir, "word_timings.json"), 'w') as f:
+        json.dump(word_timings, f, indent=2)
+    
     # Create a master transcript with all speakers in chronological order
     all_segments = []
     for speaker, segments in all_transcriptions.items():
         all_segments.extend(segments)
     
-    # Sort by start time
-    all_segments.sort(key=lambda x: x['start'])
+    # Sort by sequence number
+    all_segments.sort(key=lambda x: x['sequence'])
     
     # Write master transcript
     master_transcript = ""
-    for segment in all_segments:
+    for i, segment in enumerate(all_segments):
         timestamp = f"[{segment['start']}s - {segment['end']}s]"
-        master_transcript += f"SPEAKER {segment['speaker']}: {timestamp} {segment['text']}\n\n"
+        master_transcript += f"{i:04d} - SPEAKER {segment['speaker']}: {timestamp} {segment['text']}\n\n"
     
     if master_transcript:
         with open(os.path.join(output_dir, "master_transcript.txt"), 'w') as f:
@@ -262,116 +350,153 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
     """Unified pipeline for audio processing."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
-
-    # Clear any existing processed files in output directories
-    # to avoid confusion with previous runs
-    for subdir in os.listdir(output_dir):
-        subdir_path = os.path.join(output_dir, subdir)
-        if os.path.isdir(subdir_path) and subdir not in ["normalized", "demucs", "speakers"]:
-            for file in os.listdir(subdir_path):
-                if file.endswith("_results.zip"):
-                    # Keep zip files as they're final outputs
-                    continue
-                file_path = os.path.join(subdir_path, file)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                elif os.path.isdir(file_path):
-                    import shutil
-                    shutil.rmtree(file_path)
-
-    # Determine which audio files to process
-    if os.path.isfile(input_path):
-        audio_files = [input_path]
-    else:
-        # Process only the most recently modified audio files if in a directory
-        all_files = [
-            os.path.join(input_path, f) for f in os.listdir(input_path) 
-            if f.endswith(('.mp3', '.wav', '.m4a'))
-        ]
-        # Sort by modification time (newest first)
-        all_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        
-        # If there are too many files, just process the newest one
-        audio_files = all_files[:1] if all_files else []
-        
-        if not audio_files:
-            logging.error("No audio files found in the specified directory.")
-            return
-
-    # Load models
+    
+    # Load models FIRST to avoid repeated loading
     logging.info(f"Loading Whisper model: {model_name}")
     model = load_model(model_name)
     
     logging.info("Loading diarization pipeline")
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
     pipeline.to(device)
-
-    for audio_file in audio_files:
-        logging.info(f"Processing file: {audio_file}")
-        base_output_dir = os.path.join(output_dir, os.path.splitext(os.path.basename(audio_file))[0])
-        os.makedirs(base_output_dir, exist_ok=True)
-
-        # Processing steps with better error handling
-        try:
-            # 1. Normalize the audio (single normalization step)
-            normalized_file = normalize_audio(audio_file, base_output_dir)
+    
+    # Determine which audio file to process
+    if os.path.isfile(input_path):
+        input_basename = os.path.splitext(os.path.basename(input_path))[0]
+        audio_to_process = input_path
+    else:
+        # If URL was provided, the downloaded file is the input
+        logging.error("Expected a file path, got directory. Using most recent file.")
+        all_files = [
+            f for f in os.listdir(input_path) 
+            if os.path.isfile(os.path.join(input_path, f)) and f.endswith(('.mp3', '.wav', '.m4a'))
+        ]
+        if not all_files:
+            logging.error("No audio files found.")
+            return
             
-            # 2. Optional vocal separation
-            if enable_vocal_separation:
-                logging.info("Performing vocal separation")
+        # Use most recently modified file
+        all_files.sort(key=lambda x: os.path.getmtime(os.path.join(input_path, x)), reverse=True)
+        newest_file = all_files[0]
+        input_basename = os.path.splitext(newest_file)[0]
+        audio_to_process = os.path.join(input_path, newest_file)
+    
+    # Create output directory for this specific audio file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    final_output_dir = os.path.join(output_dir, f"{input_basename}_{timestamp}")
+    os.makedirs(final_output_dir, exist_ok=True)
+    logging.info(f"Processing audio: {audio_to_process}")
+    logging.info(f"Output directory: {final_output_dir}")
+    
+    try:
+        # 1. Normalize the audio
+        normalized_file = normalize_audio(audio_to_process, final_output_dir)
+        logging.info(f"Normalized audio: {normalized_file}")
+        
+        # 2. Optional vocal separation
+        if enable_vocal_separation:
+            logging.info("Attempting vocal separation")
+            try:
+                # Check if demucs is installed
                 try:
-                    # Check if demucs is installed first
-                    try:
-                        subprocess.run(["demucs", "--version"], 
-                                      capture_output=True, check=True)
-                        has_demucs = True
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        has_demucs = False
-                        logging.warning("Demucs not found. Skipping vocal separation.")
-                    
-                    if has_demucs:
-                        vocals_file = separate_vocals_with_demucs(normalized_file, base_output_dir)
-                        if os.path.exists(vocals_file):
-                            audio_to_process = vocals_file
-                        else:
-                            logging.warning("Vocal separation failed, falling back to normalized audio")
-                            audio_to_process = normalized_file
+                    subprocess.run(["demucs", "--version"], 
+                                  capture_output=True, check=True)
+                    has_demucs = True
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    has_demucs = False
+                    logging.warning("Demucs not found. Skipping vocal separation.")
+                
+                if has_demucs:
+                    vocals_file = separate_vocals_with_demucs(normalized_file, final_output_dir)
+                    if os.path.exists(vocals_file):
+                        audio_to_process = vocals_file
+                        logging.info(f"Using separated vocals: {vocals_file}")
                     else:
+                        logging.warning("Vocal separation failed, using normalized audio")
                         audio_to_process = normalized_file
-                except Exception as e:
-                    logging.warning(f"Vocal separation error: {e}. Falling back to normalized audio.")
+                else:
                     audio_to_process = normalized_file
-            else:
+            except Exception as e:
+                logging.warning(f"Vocal separation error: {e}. Using normalized audio.")
                 audio_to_process = normalized_file
+        else:
+            audio_to_process = normalized_file
+        
+        # 3. Speaker diarization
+        speaker_output_dir = os.path.join(final_output_dir, "speakers")
+        os.makedirs(speaker_output_dir, exist_ok=True)
+        
+        actual_num_speakers = num_speakers
+        if auto_speakers:
+            try:
+                actual_num_speakers = detect_optimal_speakers(pipeline, audio_to_process)
+            except Exception as e:
+                logging.warning(f"Auto speaker detection failed: {e}. Using provided value: {num_speakers}")
+                actual_num_speakers = num_speakers
+        
+        logging.info(f"Running diarization with {actual_num_speakers} speakers")
+        diarization = pipeline(audio_to_process, num_speakers=actual_num_speakers)
+        
+        # 4. Slice audio by speaker
+        speaker_files = slice_audio_by_speaker(audio_to_process, diarization, speaker_output_dir)
+        logging.info(f"Sliced audio into speakers: {list(speaker_files.keys())}")
+        
+        # 5. Transcribe speaker segments
+        logging.info("Starting transcription")
+        transcribe_with_whisper(model, speaker_files, final_output_dir)
+        logging.info("Transcription complete")
+        
+        # 6. Zip results
+        zip_file = zip_results(final_output_dir, audio_to_process)
+        logging.info(f"Results zipped to: {zip_file}")
+        
+        return final_output_dir
+        
+    except Exception as e:
+        logging.error(f"Error processing {audio_to_process}: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return None
+
+def copy_final_outputs(temp_dir, final_output_dir):
+    """Copy only the final output files to the final output directory."""
+    # Copy only necessary files, not intermediate ones
+    files_to_copy = [
+        "master_transcript.txt",
+        "word_timings.json"
+    ]
+    
+    directories_to_copy = [
+        "*_transcriptions",
+        "*_words",
+    ]
+    
+    for file in files_to_copy:
+        src = os.path.join(temp_dir, file)
+        if os.path.exists(src):
+            import shutil
+            shutil.copy2(src, os.path.join(final_output_dir, file))
+    
+    import glob
+    for pattern in directories_to_copy:
+        for dir_path in glob.glob(os.path.join(temp_dir, pattern)):
+            dir_name = os.path.basename(dir_path)
+            target_dir = os.path.join(final_output_dir, dir_name)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
             
-            # 3. Speaker diarization (with optional automatic speaker detection)
-            speaker_output_dir = os.path.join(base_output_dir, "speakers")
-            
-            actual_num_speakers = num_speakers
-            if auto_speakers:
-                try:
-                    actual_num_speakers = detect_optimal_speakers(pipeline, audio_to_process)
-                except Exception as e:
-                    logging.warning(f"Auto speaker detection failed: {e}. Using provided value: {num_speakers}")
-                    actual_num_speakers = num_speakers
-            
-            logging.info(f"Running diarization with {actual_num_speakers} speakers")
-            diarization = pipeline(audio_to_process, num_speakers=actual_num_speakers)
-            
-            # 4. Slice audio by speaker
-            speaker_files = slice_audio_by_speaker(audio_to_process, diarization, speaker_output_dir)
-            
-            # 5. Transcribe speaker segments
-            transcribe_with_whisper(model, speaker_files, base_output_dir)
-            
-            # 6. Zip results
-            zip_results(base_output_dir, audio_file)
-            
-            logging.info(f"Successfully processed {audio_file}")
-            
-        except Exception as e:
-            logging.error(f"Error processing {audio_file}: {e}")
-            continue
+            # Copy all files in the directory
+            for file in os.listdir(dir_path):
+                src = os.path.join(dir_path, file)
+                if os.path.isfile(src):
+                    import shutil
+                    shutil.copy2(src, os.path.join(target_dir, file))
+    
+    # Copy full transcripts
+    for file in os.listdir(temp_dir):
+        if file.endswith("_full_transcript.txt"):
+            src = os.path.join(temp_dir, file)
+            import shutil
+            shutil.copy2(src, os.path.join(final_output_dir, file))
 
 def main():
     parser = argparse.ArgumentParser(
