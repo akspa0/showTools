@@ -254,11 +254,19 @@ def transcribe_with_whisper(model, speaker_files, output_dir):
                                 if word_duration < 0.1:
                                     continue
                                     
-                                # Extract word audio
-                                word_audio = audio[word_start * 1000:word_end * 1000]
+                                # Extract word audio with generous padding
+                                # Add substantial padding before and after the word (100ms or 40% of duration, whichever is greater)
+                                padding_ms = max(100, int(word_duration * 1000 * 0.4))
                                 
-                                # Apply fade in/out
-                                fade_ms = min(30, int(word_duration * 1000 / 3))
+                                # Calculate padded boundaries (ensuring we don't go out of bounds)
+                                word_start_ms = max(0, int((word_start * 1000) - padding_ms))
+                                word_end_ms = min(len(audio), int((word_end * 1000) + padding_ms))
+                                
+                                # Extract with padding
+                                word_audio = audio[word_start_ms:word_end_ms]
+                                
+                                # Apply very gentle fade in/out (10% of duration)
+                                fade_ms = max(30, int(word_audio.duration_seconds * 1000 * 0.1))
                                 word_audio = word_audio.fade_in(fade_ms).fade_out(fade_ms)
                                 
                                 # Save word audio
