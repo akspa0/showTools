@@ -2,6 +2,8 @@ import gradio as gr
 import os
 import json
 from whisperBite import process_audio
+import tempfile
+import shutil
 from utils import download_audio
 
 def run_pipeline(input_file, input_folder, url, output_folder, model, num_speakers, 
@@ -18,11 +20,11 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
     if url:
         input_path = download_audio(url, output_folder)
     elif input_file:
-        input_path = input_file
+        input_path = input_file.name # Use .name attribute for Gradio File component
     elif input_folder:
         input_path = input_folder
     else:
-        return "Please provide an input file, folder, or URL."
+        return "Please provide an input file, folder, or URL.", None, "" # Ensure consistent return tuple
 
     # Run the processing pipeline
     try:
@@ -35,21 +37,55 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
             auto_speakers=auto_speakers
         )
         
-        # Find the results zip file
+        # Find the results zip file and transcript
         result_files = []
-        for root, _, files in os.walk(output_folder):
+        transcript = "" # Initialize transcript
+        output_base_dir = os.path.join(output_folder, os.path.splitext(os.path.basename(input_path))[0] if input_path else "output") # More robust base dir finding
+        
+        # Search within the specific output subdirectory if possible
+        search_dir = output_folder
+        potential_subdirs = [d for d in os.listdir(output_folder) if os.path.isdir(os.path.join(output_folder, d))]
+        if potential_subdirs:
+             # Attempt to find the most recently created subdirectory as the likely output
+             try:
+                 latest_subdir = max([os.path.join(output_folder, d) for d in potential_subdirs], key=os.path.getmtime)
+                 search_dir = latest_subdir
+             except Exception: # Fallback if time check fails
+                 pass # Keep search_dir as output_folder
+
+        for root, _, files in os.walk(search_dir):
             for file in files:
                 if file.endswith("_results.zip"):
                     result_files.append(os.path.join(root, file))
                 elif file == "master_transcript.txt":
-                    with open(os.path.join(root, file), 'r') as f:
-                        transcript = f.read()
-        
+                    try:
+                        with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+                            transcript = f.read()
+                    except Exception as read_err:
+                        print(f"Error reading transcript file {os.path.join(root, file)}: {read_err}")
+                        transcript = "[Error reading transcript]"
+
         results_message = f"Processing complete! Results saved to {output_folder}\n"
-        if result_files:
-            results_message += f"\nZip files created:\n" + "\n".join(result_files)
         
-        return results_message, result_files[0] if result_files else None, transcript if 'transcript' in locals() else ""
+        # Copy result file to temp dir for Gradio access
+        final_result_path = None
+        if result_files:
+            # Sort to get the most relevant one if multiple zips exist (e.g., normalized)
+            result_files.sort() 
+            original_result_path = result_files[-1] # Pick the last one alphabetically, often the main one
+            results_message += f"\nZip file created: {os.path.basename(original_result_path)}"
+            try:
+                temp_dir = tempfile.mkdtemp()
+                temp_file_path = os.path.join(temp_dir, os.path.basename(original_result_path))
+                shutil.copy2(original_result_path, temp_file_path)
+                final_result_path = temp_file_path
+            except Exception as copy_err:
+                results_message += f"\nError copying result to temp dir: {copy_err}"
+                final_result_path = None # Ensure it's None if copy fails
+        else:
+             results_message += "\nNo result zip file found."
+            
+        return results_message, final_result_path, transcript
     except Exception as e:
         import traceback
         return f"An error occurred: {str(e)}\n\n{traceback.format_exc()}", None, ""
@@ -87,7 +123,7 @@ def build_interface():
                     model = gr.Dropdown(
                         label="Whisper Model", 
                         choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3", "turbo"],
-                        value="base",
+                        value="turbo", # Default set to turbo
                         info="Larger models are more accurate but slower"
                     )
                     
@@ -123,7 +159,7 @@ def build_interface():
         submit_button = gr.Button("Process Audio", variant="primary")
         
         with gr.Row():
-            output_message = gr.Textbox(label="Status", interactive=False)
+            output_message = gr.Textbox(label="Status", interactive=False, lines=3) # Increased lines for better messages
             result_file = gr.File(label="Download Results")
             transcript_preview = gr.TextArea(label="Transcript Preview", interactive=False, lines=10)
 
@@ -178,4 +214,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     interface = build_interface()
-    interface.launch(share=args.public, server_port=args.port)
+    interface.launch(share=args.public, server_port=args.port) # Removed allowed_paths
