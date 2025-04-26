@@ -22,44 +22,10 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
     try:
         logging.info(f"Running Demucs ({model}) on {input_audio}")
         
-        # First verify demucs is installed
-        try:
-            # Try direct command
-            version_proc = subprocess.run(["demucs", "--version"], capture_output=True, text=True)
-            if version_proc.returncode == 0:
-                demucs_path = "demucs"
-                logging.info(f"Found demucs: {version_proc.stdout.strip()}")
-            else:
-                # Try to locate demucs using pip
-                pip_proc = subprocess.run(["pip", "show", "demucs"], capture_output=True, text=True)
-                if "Location:" in pip_proc.stdout:
-                    # Extract package location
-                    package_loc = None
-                    for line in pip_proc.stdout.split('\n'):
-                        if line.startswith("Location:"):
-                            package_loc = line.split("Location:")[1].strip()
-                            break
-                    
-                    if package_loc:
-                        # Look for executable in common relative paths
-                        possible_paths = [
-                            os.path.join(os.path.dirname(package_loc), "bin", "demucs"),
-                            os.path.join(package_loc, "..", "..", "bin", "demucs")
-                        ]
-                        
-                        for path in possible_paths:
-                            if os.path.exists(path) and os.access(path, os.X_OK):
-                                demucs_path = path
-                                logging.info(f"Found demucs at {path}")
-                                break
-                        else:
-                            raise FileNotFoundError("Demucs executable not found")
-                else:
-                    raise FileNotFoundError("Demucs package information not found")
-        except Exception as e:
-            logging.error(f"Demucs check failed: {e}")
-            logging.error("Demucs is not installed or not in PATH. Install with 'pip install demucs'")
-            raise RuntimeError("Demucs not found in PATH")
+        # --- Simplified Demucs Path Handling ---
+        # Assume 'demucs' is in PATH if installed in the environment
+        demucs_path = "demucs"
+        # --- End Simplified Handling ---
         
         # Verify the model is valid
         valid_models = ["htdemucs", "htdemucs_ft", "mdx", "mdx_extra"]
@@ -74,11 +40,11 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
                 demucs_path,
                 "--two-stems", "vocals",
                 "--out", temp_dir,
-                "--model", model,
+                "-n", model,
                 input_audio
             ]
             
-            logging.info(f"Running demucs command: {' '.join(cmd)}")
+            logging.info(f"[Demucs Command] Running: {' '.join(cmd)}")
             process = subprocess.run(
                 cmd,
                 check=True,
@@ -96,11 +62,15 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
             model_dir = os.path.join(temp_dir, model)
             input_base_name = os.path.splitext(os.path.basename(input_audio))[0]
             vocals_dir = os.path.join(model_dir, input_base_name)
-            vocals_file = os.path.join(vocals_dir, "vocals.wav")
+            expected_vocals_file = os.path.join(vocals_dir, "vocals.wav")
+            logging.info(f"[Demucs Output] Expecting vocals file at: {expected_vocals_file}")
             
-            if not os.path.exists(vocals_file):
+            vocals_file = None
+            if os.path.exists(expected_vocals_file):
+                vocals_file = expected_vocals_file
+            else:
                 # Try to find any vocals file (in case the model name creates a different structure)
-                logging.warning(f"Expected vocals file not found at {vocals_file}, searching for alternatives")
+                logging.warning(f"Expected vocals file not found at {expected_vocals_file}, searching for alternatives in {temp_dir}")
                 
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
@@ -108,12 +78,15 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
                             vocals_file = os.path.join(root, file)
                             break
                 
-                if not os.path.exists(vocals_file):
+                if not vocals_file:
                     logging.error(f"Could not find vocals output anywhere in {temp_dir}")
                     raise FileNotFoundError(f"No vocals output found from Demucs")
+                else:
+                    logging.info(f"[Demucs Output] Found vocals file at: {vocals_file}")
             
             # Copy the vocals file to our output directory
             final_vocals_file = os.path.join(demucs_output_dir, f"{input_base_name}_vocals.wav")
+            logging.info(f"[Demucs Output] Copying {vocals_file} to {final_vocals_file}")
             shutil.copy2(vocals_file, final_vocals_file)
             
             # Optionally copy the accompaniment (no-vocals) too if it exists
@@ -129,13 +102,19 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
                     final_stem_file = os.path.join(demucs_output_dir, f"{input_base_name}_{stem}.wav")
                     shutil.copy2(stem_file, final_stem_file)
         
-        logging.info(f"Vocal separation completed successfully. File saved to {final_vocals_file}")
+        logging.info(f"[Demucs Success] Vocal separation completed successfully. File saved to {final_vocals_file}")
         return final_vocals_file
         
     except subprocess.CalledProcessError as e:
         logging.error(f"Demucs process error: {e}")
+        logging.error(f"Demucs command: {' '.join(e.cmd)}") # Log the command that failed
         logging.error(f"Demucs stderr: {e.stderr}")
         raise
+    except FileNotFoundError:
+        # Catch if 'demucs' command is truly not found in PATH
+        logging.error("Demucs command not found. Please ensure demucs is installed in the active environment and the environment's scripts/bin directory is in your system PATH.")
+        logging.error("Install with 'pip install demucs'")
+        raise # Re-raise the error to be caught by whisperBite.py
     except Exception as e:
         logging.error(f"Error during vocal separation: {e}")
         raise

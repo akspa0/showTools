@@ -54,82 +54,55 @@ def download_audio(url, output_dir, force_redownload=True):
         raise
 
 def zip_results(output_dir, input_filename):
-    """Zip the results into a single zip file containing transcriptions and their audio files."""
+    """Zip the results directory contents into a single zip file."""
     base_name = os.path.splitext(os.path.basename(input_filename))[0]
-    zip_filename = os.path.join(output_dir, f"{base_name}_results.zip")
+    # Place zip file one level *above* the specific output_dir if possible, 
+    # otherwise it gets included in the walk.
+    parent_dir = os.path.dirname(output_dir)
+    zip_filename = os.path.join(parent_dir, f"{base_name}_results_{os.path.basename(output_dir)}.zip") # Add timestamped folder name for uniqueness
+
+    # Ensure parent directory exists (e.g., if output_dir was created at top level)
+    os.makedirs(parent_dir, exist_ok=True)
+
+    logging.info(f"Creating zip archive: {zip_filename}")
+
+    # Folders to exclude from the zip
+    excluded_folders = ["normalized", "downloads"]
+    # Files to exclude (like the zip itself if it ended up in the output_dir)
+    excluded_files = [os.path.basename(zip_filename)] 
 
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        # Add the master transcript
-        master_transcript = os.path.join(output_dir, "master_transcript.txt")
-        if os.path.exists(master_transcript):
-            zipf.write(master_transcript, os.path.basename(master_transcript))
-        
-        # Add speaker transcripts
-        for item in os.listdir(output_dir):
-            if item.endswith("_full_transcript.txt"):
-                full_path = os.path.join(output_dir, item)
-                zipf.write(full_path, item)
-            elif item.endswith("word_timings.json"):
-                full_path = os.path.join(output_dir, item)
-                zipf.write(full_path, item)
-        
-        # Add transcription files and audio files
         for root, dirs, files in os.walk(output_dir):
-            # Include all files in _transcriptions and _words directories
-            if "_transcriptions" in root or "_words" in root:
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    
-                    # Store folder structure relative to output_dir
-                    relative_path = os.path.relpath(full_path, output_dir)
-                    
-                    # Add .txt files directly
-                    if file.endswith(".txt"):
-                        zipf.write(full_path, relative_path)
-                    
-                    # Add .wav files directly or convert to MP3
-                    elif file.endswith(".wav"):
-                        try:
-                            # For word files, add WAV directly to save time
-                            if "_words" in root:
-                                zipf.write(full_path, relative_path)
-                            else:
-                                # For larger segment files, convert to MP3
-                                mp3_file = os.path.splitext(full_path)[0] + ".mp3"
-                                audio = AudioSegment.from_file(full_path)
-                                audio.export(mp3_file, format="mp3", bitrate="128k")
-                                
-                                # Add MP3 to the zip
-                                mp3_relative_path = os.path.splitext(relative_path)[0] + ".mp3"
-                                zipf.write(mp3_file, mp3_relative_path)
-                                
-                                # Clean up the MP3 file after adding to zip
-                                os.remove(mp3_file)
-                        except Exception as e:
-                            logging.warning(f"Error with audio file {file}: {e}. Adding directly.")
-                            zipf.write(full_path, relative_path)
-            
-        # Create a metadata.json file with processing information
-        metadata = {
-            "source_file": os.path.basename(input_filename),
-            "processing_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "num_speakers": len([d for d in os.listdir(output_dir) if d.endswith("_full_transcript.txt")]),
-            "contents": {
-                "transcriptions": True,
-                "word_clips": "_words" in " ".join(os.listdir(output_dir)),
-                "master_transcript": os.path.exists(master_transcript)
+            # Modify dirs in place to prevent walking into excluded folders
+            dirs[:] = [d for d in dirs if d not in excluded_folders]
+
+            for file in files:
+                if file in excluded_files:
+                    continue
+                
+                full_path = os.path.join(root, file)
+                # Archive name is path relative to output_dir
+                archive_name = os.path.relpath(full_path, output_dir)
+                
+                logging.debug(f"Adding to zip: {full_path} as {archive_name}")
+                zipf.write(full_path, archive_name)
+
+        # --- Optionally, add metadata --- 
+        # (Can be refined later based on what's useful)
+        try:
+            metadata = {
+                "source_file": os.path.basename(input_filename),
+                "processing_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                # Add more metadata if needed, e.g., parameters used
             }
-        }
-        
-        # Add metadata to zip
-        from io import BytesIO
-        metadata_bytes = BytesIO(json.dumps(metadata, indent=2).encode('utf-8'))
-        zipf.writestr("metadata.json", metadata_bytes.getvalue())
+            from io import BytesIO
+            metadata_bytes = BytesIO(json.dumps(metadata, indent=2).encode('utf-8'))
+            zipf.writestr("processing_metadata.json", metadata_bytes.getvalue())
+        except Exception as meta_err:
+             logging.warning(f"Could not generate or add metadata.json: {meta_err}")
+        # --- End metadata --- 
 
-    logging.info(f"Results zipped into: {zip_filename}")
-    return zip_filename
-
-    logging.info(f"Results zipped into: {zip_filename}")
+    logging.info(f"Successfully created zip file: {zip_filename}")
     return zip_filename
 
 def create_thumbnail_waveform(audio_file, output_path):

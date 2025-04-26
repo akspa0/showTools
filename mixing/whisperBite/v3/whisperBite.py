@@ -21,6 +21,24 @@ logging.basicConfig(
 
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv')
 
+def format_speaker_label(label):
+    """Formats pyannote speaker labels (e.g., SPEAKER_00, 1) to S0, S1 etc."""
+    if isinstance(label, int):
+        return f"S{label}"
+    elif isinstance(label, str):
+        # Extract number, handling potential "SPEAKER_" prefix
+        parts = label.split('_')
+        num_part = parts[-1]
+        try:
+            num = int(num_part)
+            return f"S{num}"
+        except ValueError:
+            logging.warning(f"Could not format speaker label '{label}', using original.")
+            return label # Fallback to original label if parsing fails
+    else:
+        logging.warning(f"Unexpected speaker label type: {type(label)}. Using as is.")
+        return str(label) # Fallback for unexpected types
+
 def normalize_audio(input_audio, output_dir, target_lufs=-16):
     """Normalize audio to target LUFS using ffmpeg."""
     normalized_dir = os.path.join(output_dir, "normalized")
@@ -113,13 +131,14 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
     segment_info = {}
     segment_counter = 0
     
-    for speaker, segments in speaker_segments.items():
-        speaker_dir = os.path.join(speaker_output_dir, f"Speaker_{speaker}")
+    for speaker_raw, segments in speaker_segments.items(): # Use raw label here
+        formatted_speaker = format_speaker_label(speaker_raw) # Format for output
+        speaker_dir = os.path.join(speaker_output_dir, formatted_speaker) # Use formatted name
         os.makedirs(speaker_dir, exist_ok=True)
         
-        if speaker not in speaker_files:
-            speaker_files[speaker] = []
-            segment_info[speaker] = []
+        if formatted_speaker not in speaker_files:
+            speaker_files[formatted_speaker] = []
+            segment_info[formatted_speaker] = []
         
         # Sort segments by start time
         segments.sort(key=lambda x: x['start'])
@@ -156,8 +175,8 @@ def slice_audio_by_speaker(file_path, diarization, speaker_output_dir, min_segme
             # Export with normalized volume
             segment_audio.export(segment_path, format="wav")
             
-            speaker_files[speaker].append(segment_path)
-            segment_info[speaker].append({
+            speaker_files[formatted_speaker].append(segment_path)
+            segment_info[formatted_speaker].append({ # Store with formatted speaker name
                 'path': segment_path,
                 'start': segment['start'],
                 'end': segment['end'],
@@ -180,15 +199,15 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
     word_timings = {}  # Initialize even if not used, for consistency
     word_counter = 0
     
-    # Iterate through the segment info dictionary {speaker: [list_of_segment_dicts]}
-    for speaker, segments in segment_info_dict.items():
-        speaker_transcription_dir = os.path.join(output_dir, f"Speaker_{speaker}_transcriptions")
+    # Iterate through the segment info dictionary {formatted_speaker: [list_of_segment_dicts]}
+    for formatted_speaker, segments in segment_info_dict.items(): # Already formatted from previous step
+        speaker_transcription_dir = os.path.join(output_dir, f"{formatted_speaker}_transcriptions") # Use formatted name
         os.makedirs(speaker_transcription_dir, exist_ok=True)
         
         # Create words directory for this speaker only if needed
         words_dir = None
         if enable_word_extraction:
-            words_dir = os.path.join(output_dir, f"Speaker_{speaker}_words")
+            words_dir = os.path.join(output_dir, f"{formatted_speaker}_words") # Use formatted name
             os.makedirs(words_dir, exist_ok=True)
         
         speaker_full_transcript = ""
@@ -264,10 +283,10 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
                                 word_audio.export(word_path, format="wav")
                                 
                                 # Store word timing info
-                                if speaker not in word_timings:
-                                    word_timings[speaker] = []
+                                if formatted_speaker not in word_timings:
+                                    word_timings[formatted_speaker] = []
                                     
-                                word_timings[speaker].append({
+                                word_timings[formatted_speaker].append({
                                     'word': word,
                                     'file': word_path,
                                     'start': start_time + word_start,
@@ -280,6 +299,7 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
                 
                 # Create a reasonable output filename based on the first few words and sequence
                 first_words = text.split()[:5]
+                # NOTE: Filename doesn't include speaker label, just sequence and content
                 base_name = f"{seq_num:04d}_{sanitize_filename('_'.join(first_words))}"
                 
                 # Create output paths
@@ -300,8 +320,8 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
                 speaker_full_transcript += f"{timestamp_str} {text}\n\n"
                 
                 # Store info for master transcript
-                segment_transcriptions.append({
-                    'speaker': speaker,
+                segment_transcriptions.append({ # Store formatted speaker name
+                    'speaker': formatted_speaker,
                     'start': start_time,
                     'end': end_time,
                     'text': text,
@@ -316,11 +336,12 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
         
         # Write the combined transcript for this speaker
         if speaker_full_transcript:
-            with open(os.path.join(output_dir, f"Speaker_{speaker}_full_transcript.txt"), 'w') as f:
-                f.write(f"=== SPEAKER {speaker} TRANSCRIPT ===\n\n")
+            # Use formatted name for the file
+            with open(os.path.join(output_dir, f"{formatted_speaker}_full_transcript.txt"), 'w') as f:
+                f.write(f"=== SPEAKER {formatted_speaker} TRANSCRIPT ===\n\n") # Use formatted name in header
                 f.write(speaker_full_transcript)
         
-        all_transcriptions[speaker] = segment_transcriptions
+        all_transcriptions[formatted_speaker] = segment_transcriptions # Store with formatted key
     
     # Save word timings to JSON (only if enabled and populated)
     if enable_word_extraction and word_timings:
@@ -337,15 +358,9 @@ def transcribe_with_whisper(model, segment_info_dict, output_dir, enable_word_ex
     # Sort by start time (more reliable than sequence if passes differ)
     all_segments.sort(key=lambda x: x['start'])
     
-    # Write master transcript
-    master_transcript = ""
-    for i, segment in enumerate(all_segments):
-        timestamp = f"[{segment['start']:.2f}s - {segment['end']:.2f}s]"
-        master_transcript += f"{i:04d} - SPEAKER {segment['speaker']}: {timestamp} {segment['text']}\n\n"
-    
-    if master_transcript:
-        with open(os.path.join(output_dir, "master_transcript.txt"), 'w') as f:
-            f.write(master_transcript)
+    # --- Master Transcript writing logic moved to process_audio --- 
+    # Return all segments for merging/writing later
+    return all_segments 
 
 def run_second_pass_diarization(first_pass_segment_info, first_pass_output_dir, diarization_pipeline, whisper_model, final_output_dir, segment_min_duration=5.0, second_pass_speakers=2):
     """
@@ -363,13 +378,13 @@ def run_second_pass_diarization(first_pass_segment_info, first_pass_output_dir, 
     refined_segments_info = [] # List to store info for the master transcript
     sub_segment_counter = 0 # Global counter for unique sub-segment filenames
 
-    # Iterate through speakers and their first-pass segments (already dicts)
-    for speaker, segments in first_pass_segment_info.items():
-        logging.info(f"Processing Speaker {speaker} segments for second pass...")
+    # Iterate through speakers and their first-pass segments (already dicts with formatted labels)
+    for formatted_speaker, segments in first_pass_segment_info.items():
+        logging.info(f"Processing {formatted_speaker} segments for second pass...")
         
-        # Ensure speaker-specific directories exist in 2nd pass output
-        current_spk_2nd_pass_audio_dir = os.path.join(second_pass_speakers_dir, f"Speaker_{speaker}")
-        current_spk_2nd_pass_ts_dir = os.path.join(second_pass_transcripts_dir, f"Speaker_{speaker}_transcriptions")
+        # Ensure speaker-specific directories exist in 2nd pass output (use formatted label)
+        current_spk_2nd_pass_audio_dir = os.path.join(second_pass_speakers_dir, formatted_speaker)
+        current_spk_2nd_pass_ts_dir = os.path.join(second_pass_transcripts_dir, f"{formatted_speaker}_transcriptions")
         os.makedirs(current_spk_2nd_pass_audio_dir, exist_ok=True)
         os.makedirs(current_spk_2nd_pass_ts_dir, exist_ok=True)
 
@@ -469,8 +484,10 @@ def run_second_pass_diarization(first_pass_segment_info, first_pass_output_dir, 
                                 f.write(f"{timestamp_str} {text}")
 
                             # Store info for the final 2nd pass master transcript (using new paths)
+                            # Use formatted speaker label from the *second pass* diarization
+                            sub_speaker_formatted = format_speaker_label(sub_speaker)
                             refined_segments_info.append({
-                                'speaker': sub_speaker, # The speaker label FROM THE SECOND PASS
+                                'speaker': sub_speaker_formatted, # The FORMATTED speaker label FROM THE SECOND PASS
                                 'start': abs_start,
                                 'end': abs_end,
                                 'text': text,
@@ -501,21 +518,8 @@ def run_second_pass_diarization(first_pass_segment_info, first_pass_output_dir, 
     # Create the 2nd pass master transcript
     refined_segments_info.sort(key=lambda x: x['start']) # Sort by absolute start time
 
-    master_transcript_2nd_pass = ""
-    for i, segment in enumerate(refined_segments_info):
-        timestamp = f"[{segment['start']:.2f}s - {segment['end']:.2f}s]"
-        # Note: Speaker label here is from the second pass analysis
-        master_transcript_2nd_pass += f"{i:04d} - SPEAKER {segment['speaker']} (Refined): {timestamp} {segment['text']}\n\n" 
-
-    if master_transcript_2nd_pass:
-        master_transcript_path = os.path.join(second_pass_base_dir, "master_transcript.txt")
-        with open(master_transcript_path, 'w', encoding='utf-8') as f:
-            f.write(master_transcript_2nd_pass)
-        logging.info(f"Second pass master transcript saved to: {master_transcript_path}")
-    else:
-        logging.info("No refined segments generated during second pass.")
-
     logging.info("Second Pass Diarization Refinement Finished.")
+    return refined_segments_info # Return the list
 
 def extract_audio_from_video(video_path, output_wav_path):
     """Extracts audio from video file using ffmpeg."""
@@ -628,23 +632,14 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         if enable_vocal_separation:
             logging.info("Attempting vocal separation")
             try:
-                # Check if demucs is installed
-                try:
-                    # Use subprocess.run consistently
-                    result = subprocess.run(["demucs", "--version"], capture_output=True, check=True, text=True)
-                    logging.debug(f"Demucs version check output: {result.stdout}")
-                    has_demucs = True
-                except (subprocess.SubprocessError, FileNotFoundError):
-                    has_demucs = False
-                    logging.warning("Demucs command not found or failed. Skipping vocal separation.")
-                
-                if has_demucs:
-                    vocals_file = separate_vocals_with_demucs(pipeline_audio_input, final_output_dir) # Use normalized file
-                    if vocals_file and os.path.exists(vocals_file):
-                        pipeline_audio_input = vocals_file # Update input for next steps
-                        logging.info(f"Using separated vocals: {vocals_file}")
-                    else:
-                        logging.warning("Vocal separation failed or produced no output, using normalized audio for subsequent steps.")
+                logging.info(f"[Vocal Separation] Calling separate_vocals_with_demucs with input: {pipeline_audio_input}")
+                vocals_file = separate_vocals_with_demucs(pipeline_audio_input, final_output_dir) # Use normalized file
+                logging.info(f"[Vocal Separation] separate_vocals_with_demucs returned: {vocals_file}")
+                if vocals_file and os.path.exists(vocals_file):
+                    pipeline_audio_input = vocals_file # Update input for next steps
+                    logging.info(f"[Vocal Separation] Successfully updated pipeline_audio_input to: {pipeline_audio_input}")
+                else:
+                    logging.warning("Vocal separation failed or produced no output, using normalized audio for subsequent steps.")
             except Exception as e:
                 logging.warning(f"Vocal separation error: {e}. Using normalized audio for subsequent steps.")
         
@@ -669,23 +664,108 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         
         # 5. Transcribe speaker segments
         logging.info("Starting transcription")
-        transcribe_with_whisper(model, segment_info_dict, final_output_dir, enable_word_extraction=enable_word_extraction)
+        # Transcribe_with_whisper now returns the flattened list of first-pass segments
+        first_pass_segments = transcribe_with_whisper(model, segment_info_dict, final_output_dir, enable_word_extraction=enable_word_extraction)
         logging.info("Transcription complete")
+
+        final_segments_for_transcript = first_pass_segments # Default to first pass
+        refined_segments_info = [] # Initialize
 
         # 5b. Optional Second Pass Refinement
         if enable_second_pass:
             logging.info("Starting second pass refinement...")
-            run_second_pass_diarization(
-                first_pass_segment_info=segment_info_dict,
+            # run_second_pass_diarization now returns the refined segments
+            refined_segments_info = run_second_pass_diarization(
+                first_pass_segment_info=segment_info_dict, # Pass the original dict for processing
                 first_pass_output_dir=speaker_output_dir, 
                 diarization_pipeline=pipeline,
                 whisper_model=model,
                 final_output_dir=final_output_dir 
             )
             logging.info("Second pass refinement complete.")
+            
+            # --- Merge first and second pass results --- 
+            if refined_segments_info:
+                logging.info("Merging first and second pass transcripts...")
+                logging.info(f"[Merge Debug] Received {len(refined_segments_info)} refined segments: {refined_segments_info[:2]}...")
+                
+                # Create a dictionary of refined segments keyed by original sequence number for quick lookup
+                refined_lookup = {}
+                parsing_failures = 0 # Counter for failures
+                for ref_seg in refined_segments_info:
+                    original_seq = None # Reset for each segment
+                    try:
+                        original_seq = int(os.path.basename(ref_seg['audio_file']).split('_')[0])
+                        if original_seq not in refined_lookup:
+                            refined_lookup[original_seq] = []
+                        refined_lookup[original_seq].append(ref_seg)
+                        # logging.debug(f"[Merge Debug] Parsed original_seq {original_seq} successfully for {ref_seg['audio_file']}") # Optional debug log
+                    except (IndexError, ValueError):
+                        logging.warning(f"[Merge Debug] PARSE FAILED for original sequence from refined segment filename: {ref_seg['audio_file']}") # Log failure clearly
+                        parsing_failures += 1
+                        continue
+                # Log total failures after the loop
+                if parsing_failures > 0:
+                    logging.warning(f"[Merge Debug] Total filename parsing failures: {parsing_failures}")
+
+                logging.info(f"[Merge Debug] Refined lookup dict created (showing first 5 items): {dict(list(refined_lookup.items())[:5])}") # MODIFIED LOG slightly for brevity
+
+                merged_segments = []
+                processed_first_pass_seqs = set(refined_lookup.keys())
+                logging.info(f"[Merge Debug] Original sequences processed in 2nd pass ({len(processed_first_pass_seqs)} total): {list(processed_first_pass_seqs)[:10]}...") # MODIFIED LOG slightly for brevity
+                
+                # Add non-refined first pass segments
+                logging.info(f"[Merge Debug] Iterating through {len(first_pass_segments)} first-pass segments to find unrefined ones...") # Existing Log
+                kept_originals = 0
+                for fp_seg in first_pass_segments:
+                    is_processed = fp_seg['sequence'] in processed_first_pass_seqs
+                    # Change this log to INFO level
+                    logging.info(f"[Merge Debug] Checking 1st pass seg #{fp_seg['sequence']}. Processed in 2nd pass? {is_processed}") # CHANGED to INFO
+                    if not is_processed:
+                        merged_segments.append(fp_seg)
+                        kept_originals += 1
+                
+                logging.info(f"[Merge Debug] Kept {kept_originals} original unrefined segments.") # ADDED LOG
+
+                # Add all refined segments
+                logging.info(f"[Merge Debug] Adding all refined segments from lookup values...") # Existing Log
+                added_refined = 0
+                for ref_list in refined_lookup.values():
+                    merged_segments.extend(ref_list)
+                    added_refined += len(ref_list)
+                logging.info(f"[Merge Debug] Added {added_refined} refined segments.") # ADDED LOG
+
+                logging.info(f"[Merge Debug] Total segments before sorting: {len(merged_segments)}") # Existing Log
+                    
+                # Sort the final merged list
+                merged_segments.sort(key=lambda x: x['start'])
+                final_segments_for_transcript = merged_segments
+                logging.info(f"[Merge Debug] Total segments after sorting: {len(final_segments_for_transcript)}") # Existing Log
+                logging.info("Merging complete.")
+            else:
+                logging.info("No segments were refined in second pass, using first pass transcript.")
+                # Keep final_segments_for_transcript as first_pass_segments
+
         else:
             logging.info("Second pass refinement skipped.")
+            # Keep final_segments_for_transcript as first_pass_segments
+
+        # --- Write the final master transcript --- 
+        master_transcript_path = os.path.join(final_output_dir, "master_transcript.txt")
+        master_transcript_content = ""
+        for i, segment in enumerate(final_segments_for_transcript):
+            timestamp = f"[{segment['start']:.2f}s - {segment['end']:.2f}s]"
+            # Use the speaker label already stored in the segment dict (should be formatted)
+            master_transcript_content += f"{i:04d} - {segment['speaker']}: {timestamp} {segment['text']}\n\n"
         
+        if master_transcript_content:
+            logging.info(f"Writing final master transcript to: {master_transcript_path}")
+            with open(master_transcript_path, 'w', encoding='utf-8') as f:
+                f.write(master_transcript_content)
+        else:
+            logging.warning("No segments found to write to master transcript.")
+        # --- End Master Transcript Writing --- 
+
         # 6. Zip results
         # Use the original input basename for the zip file name
         zip_file = zip_results(final_output_dir, initial_input_file) 
