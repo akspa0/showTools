@@ -1,110 +1,77 @@
 # WhisperBite
 
-WhisperBite is an audio processing tool that automatically extracts and transcribes spoken content from audio files. It identifies different speakers, separates the audio into bite-sized segments, and provides accurate transcriptions with timestamps.
+WhisperBite is a tool built with Gradio that processes audio and video files to perform speaker diarization (identifying who spoke when) and transcription using OpenAI's Whisper model. It can handle various inputs, separate vocals, extract individual words, and refine results with a second pass.
 
 ## Features
 
-- **Speaker Diarization**: Automatically identifies and separates different speakers
-- **Word-Level Segmentation**: Creates individual audio clips for each spoken word
-- **Transcription**: Uses OpenAI's Whisper models for high-quality transcriptions
-- **Vocal Separation**: Optional removal of background music and noise
-- **Customizable Processing**: Multiple options for fine-tuning results
-- **Sequential Ordering**: All outputs maintain original chronological order with sequence prefixes
+*   **Input:** Accepts single audio/video files, folders (processes newest file), or URLs (YouTube, direct links).
+*   **Audio Extraction:** Automatically extracts audio from video inputs.
+*   **Normalization:** Normalizes audio loudness to a standard level.
+*   **Vocal Separation (Optional):** Uses Demucs to separate vocals from background noise/music.
+*   **Speaker Diarization:** Identifies different speakers using `pyannote.audio`.
+*   **Transcription:** Transcribes the speech for each identified speaker using Whisper.
+*   **Output:** Creates:
+    *   Individual audio segments per speaker turn.
+    *   Text transcripts per speaker turn.
+    *   A master transcript combining all speakers chronologically.
+    *   Optional individual word audio snippets with timestamps.
+    *   A zip file containing all results.
+*   **Second Pass Refinement (Optional):** Re-analyzes longer segments to potentially improve speaker separation accuracy.
 
-## Installation
+## Prerequisites
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/whisperBite.git
-cd whisperBite
+1.  **Python:** Version 3.9 or higher recommended.
+2.  **ffmpeg:** Required for audio normalization and extraction from video. You must install it separately and ensure it's available in your system's PATH.
+    *   **Windows:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` directory to your PATH environment variable.
+    *   **macOS (using Homebrew):** `brew install ffmpeg`
+    *   **Linux (using apt):** `sudo apt update && sudo apt install ffmpeg`
+3.  **PyTorch:** The `requirements.txt` file lists `torch`. Depending on your system (CPU-only or GPU with CUDA), you might need a specific version. Check the [PyTorch website](https://pytorch.org/get-started/locally/) for the correct installation command for your setup.
 
-# Install required packages
-pip install -r requirements.txt
+## Setup
 
-# For vocal separation, install Demucs
-pip install demucs
-```
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url> # Replace with the actual URL
+    cd whisperBite
+    ```
 
-## Required Dependencies
+2.  **Create and activate a virtual environment (recommended):**
+    ```bash
+    python -m venv venv
+    # Windows
+    .\venv\Scripts\activate
+    # macOS/Linux
+    source venv/bin/activate
+    ```
 
-- Python 3.8+
-- PyTorch
-- Whisper
-- pyannote.audio (requires Hugging Face token)
-- PyDub
-- FFmpeg
-- Gradio (for web interface)
-- yt-dlp (for downloading audio from URLs)
+3.  **Install Python dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *Note: If you encounter issues with PyTorch, install it manually first using the command from the PyTorch website, then run the command above again.*
 
-## Usage
+4.  **Hugging Face Token:**
+    *   `pyannote.audio` requires a Hugging Face token for accessing diarization models.
+    *   Get a token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read access is sufficient).
+    *   You can either:
+        *   Set the `HF_TOKEN` environment variable before running the app.
+        *   Enter the token directly into the "Hugging Face Token" field in the Gradio UI.
 
-### Command Line
+## Running the Application
 
-```bash
-python whisperBite.py --input_file path/to/audio.mp3 --output_dir ./output --model base --num_speakers 2 --auto_speakers --enable_vocal_separation
-```
-
-### Web Interface
+Once setup is complete, run the Gradio application:
 
 ```bash
 python app.py
 ```
 
-Then open http://localhost:7860 in your browser
+This will start a local web server. Open the provided URL (usually `http://127.0.0.1:7860`) in your browser to use the interface.
 
-To make the interface publicly accessible:
+## Notes
 
-```bash
-python app.py --public
-```
-
-### Options
-
-- `--input_file`: Path to input audio file
-- `--input_dir`: Directory containing multiple audio files
-- `--url`: URL to download audio from (YouTube, etc.)
-- `--output_dir`: Directory to save output files
-- `--model`: Whisper model size (tiny, base, small, medium, large)
-- `--num_speakers`: Expected number of speakers
-- `--auto_speakers`: Automatically detect optimal speaker count
-- `--enable_vocal_separation`: Remove background music and noise
-
-## Output Structure
-
-WhisperBite creates a timestamped output directory for each processed file:
-
-```
-output_dir/
-├── filename_[timestamp]/
-│   ├── master_transcript.txt          # Full chronological transcript with speaker labels
-│   ├── Speaker_X_full_transcript.txt  # Complete transcript for each speaker
-│   ├── word_timings.json              # JSON with metadata for all extracted words
-│   ├── Speaker_X_transcriptions/      # Speaker segments with transcripts
-│   │   ├── 0000_segment_text.wav      # Audio segment
-│   │   └── 0000_segment_text.txt      # Segment transcript
-│   ├── Speaker_X_words/               # Individual word audio clips
-│   │   ├── 0000_word.wav
-│   │   ├── 0001_word.wav
-│   │   └── ...
-│   └── filename_results.zip           # All outputs packaged for sharing
-```
-
-## Example
-
-Process a YouTube interview:
-
-```bash
-python whisperBite.py --url https://www.youtube.com/watch?v=example --output_dir ./output --model small --auto_speakers --enable_vocal_separation
-```
-
-## Requirements for Hugging Face
-
-To use the speaker diarization feature, you need a Hugging Face token with access to the pyannote/speaker-diarization model:
-
-1. Create an account on Hugging Face
-2. Generate an access token at https://huggingface.co/settings/tokens
-3. Accept the user agreement for pyannote/speaker-diarization
-4. Provide your token when using the web interface
+*   **Vocal Separation:** Requires `demucs` to be installed (`pip install demucs`). If enabled, separation is performed once on the normalized audio *before* the first diarization pass. The second pass refinement (if enabled) uses segments derived from this initially separated audio.
+*   **Second Pass:** This feature analyzes segments longer than 5 seconds from the first pass to try and refine speaker labels. It can be time-consuming.
+*   **Resource Usage:** Whisper models (especially larger ones) and Demucs can be computationally intensive and require significant RAM/VRAM.
 
 ## License
 
