@@ -1,0 +1,8 @@
+gradio
+openai-whisper
+pyannote.audio>=3.0 # Specify >=3.0 for potential Hugging Face API changes
+torch # Note: Specific version might be needed depending on CUDA setup and other libraries
+torchaudio
+pydub
+demucs # For optional vocal separation
+yt-dlp # For URL downloading 

@@ -1,14 +1,15 @@
 ## Set Globals
 
 Set these variables in globals_custom.conf:
-
+```bash
 SS=$
 MIXMON_DIR=/var/spool/asterisk/monitor/
 MONITOR_REC_OPTION = br(${SS}{MIXMON_DIR}${SS}{YEAR}/${SS}{MONTH}/${SS}{DAY}/recv_${SS}{CALLFILENAME}.${SS}{MON_FMT})t(${SS}{MIXMON_DIR}${SS}{YEAR}/${SS}{MONTH}/${SS}{DAY}/trans_${SS}{CALLFILENAME}.${SS}{MON_FMT})
 MIXMON_POST = /var/spool/asterisk/mix-stereo.sh ${SS}{MIXMON_DIR}${SS}{YEAR}/${SS}{MONTH}/${SS}{DAY}/ ${SS}{CALLFILENAME}
-
+```
 create the shell script /var/spool/asterisk/mix-stereo.sh with the following:
 
+```bash
 #!/bin/bash
 
 SOX="/usr/bin/sox -M"
@@ -19,6 +20,7 @@ OUT="${1}trans_$2.wav"
 DESTINATION="${1}stereo_$2.wav"
 
 $SOX -M $IN $OUT $DESTINATION && $RM $IN $OUT
+```
 
 # CallRecording Patch for Stereo Recordings
 
