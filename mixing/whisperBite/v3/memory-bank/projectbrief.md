@@ -10,7 +10,8 @@ Core goals:
 5.  Transcribe the speech for each speaker accurately using OpenAI's Whisper.
 6.  Provide word-level timestamps and extract individual word audio snippets (**optional, `--enable_word_extraction`, default off**).
 7.  Optionally enhance audio quality through normalization and vocal separation.
-8.  Produce structured output including transcripts, segmented audio, and word data, accessible via download in the UI or directly in the filesystem.
-9.  Offer a user-friendly web interface for configuration and execution.
+8.  **Optionally detect non-speech sounds (if vocal separation is enabled).**
+9.  Produce structured output including transcripts (with formatted speaker labels `S0`, `S1`, etc., and sound events), segmented audio, and word data, accessible via download in the UI or directly in the filesystem.
+10. Offer a user-friendly web interface for configuration and execution (with manual speaker count as default).
 
 [The foundational document. Define core requirements and goals. Source of truth for project scope.] 

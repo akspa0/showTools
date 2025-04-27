@@ -5,12 +5,13 @@
 **Solution:** WhisperBite automates this process via a user-friendly web interface (`app.py`) or a command-line tool (`whisperBite.py`). It accepts **audio or video files**, URLs, or folders (processing the newest compatible file within). **For video inputs, it automatically extracts the audio** before performing diarization and transcription.
 *   **Refinement:** It includes an **optional second pass** that re-analyzes longer segments from the first pass to detect and separate missed speaker changes, improving accuracy.
 *   **Word Extraction:** It can optionally isolate individual words with their timings and audio snippets, though this feature is **disabled by default** as it generates many files.
+*   **Sound Detection:** If vocal separation is enabled, it can **optionally attempt** to identify non-speech sounds (like music or noise tags from Whisper) in the non-vocal audio track and include them in the master transcript.
 
 **How it Works (User Perspective - Web UI):**
 1.  Launch the Gradio app (`python app.py`).
 2.  Provide source (upload audio/video file, specify folder path [processes newest file], or enter URL).
-3.  Configure options: Whisper model, speaker settings (initial estimate or auto-detect), vocal separation.
-4.  **Configure advanced options:** Enable second pass refinement? Enable word audio extraction?
+3.  Configure options: Whisper model, speaker settings (manual count [default] or auto-detect), vocal separation.
+4.  **Configure advanced options:** Enable second pass refinement? Enable word audio extraction? Enable sound detection (if vocal separation is on)?
 5.  Provide Hugging Face token (for diarization).
 6.  Specify output directory.
 7.  Click "Process Audio". (The app extracts audio from video automatically if needed).
@@ -24,5 +25,5 @@
 *   Automate complex audio processing tasks.
 *   **Address common diarization inaccuracies with an optional refinement step.**
 *   Generate detailed and usable outputs.
-*   **Allow users to control the verbosity of output (e.g., word extraction).**
+*   **Allow users to control the verbosity of output (e.g., word extraction, sound detection).**
 *   Offer flexibility through optional processing steps and model choices. 

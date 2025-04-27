@@ -17,16 +17,22 @@
         *   Calls normalization, optional vocal separation, diarization, slicing.
         *   Calls `transcribe_with_whisper`.
         *   Conditionally calls `run_second_pass_diarization`.
+        *   Conditionally transcribes non-vocal track for sound detection.
+        *   Merges speech and sound segments.
+        *   Writes final master transcript.
         *   Calls `zip_results`.
         *   **Cleans up temporary extracted WAV in `finally` block.**
     *   `extract_audio_from_video()`: Uses `ffmpeg` via `subprocess` to extract audio.
-    *   `transcribe_with_whisper()`: Handles transcription, conditional word extraction.
-    *   `run_second_pass_diarization()`: Implements refinement pass. Iterates first-pass segments, runs diarization, checks for overlap. If found, re-slices audio, transcribes sub-segments, **saves refined audio/text files using content-based naming (similar to first pass)**, and aggregates `2nd_pass/master_transcript.txt`.
+    *   `transcribe_with_whisper()`: Handles transcription, conditional word extraction. Returns list of first-pass segments.
+    *   `run_second_pass_diarization()`: Implements refinement pass. Iterates first-pass segments, runs diarization, checks for overlap. If found, re-slices audio, transcribes sub-segments, saves refined audio/text files using content-based naming, and **returns a list of refined segments.**
+    *   `format_speaker_label()`: Converts raw speaker labels (e.g., `SPEAKER_00`) to concise format (`S0`). Used during slicing and refinement.
     *   Other helpers (`normalize_audio`, `slice_audio_by_speaker`, etc.).
+*   `vocal_separation.py`:
+    *   `separate_vocals_with_demucs()`: Runs Demucs, **returns paths to both `vocals.wav` and `no_vocals.wav` (if found).**
 *   `utils.py`, `vocal_separation.py`: Helpers.
 
-**Processing Flow (Video Input):**
-UI Input (Video) -> `app.py:run_pipeline` -> `whisperBite.process_audio` -> Detect Video -> `extract_audio_from_video` (ffmpeg -> temp WAV) -> Normalize (temp WAV) -> ... [Rest of pipeline using normalized temp WAV] ... -> **`zip_results` (Recursively zips entire output dir excluding intermediates)** -> Cleanup (Delete temp WAV).
+**Processing Flow (Simplified):**
+Input -> `app.py` -> `process_audio` -> Video Check/Extract -> Normalize -> [Optional Vocal Separation -> Store `vocals` & `no_vocals` paths -> Update main audio path to `vocals`] -> Diarize (`pyannote` on `vocals` or normalized audio) -> Slice audio (using formatted `S0` labels) -> Transcribe slices (`whisper`) -> [Optional Sound Detection -> Transcribe `no_vocals` -> Filter for tags -> Create `SOUND` segments] -> [Optional 2nd Pass -> Refine long segments -> Return refined segments] -> Merge (1st pass or [Unrefined 1st + Refined 2nd]) + Sounds -> Sort chronologically -> Write Master Transcript -> Zip -> Cleanup.
 
 **Data Management:**
 *   Timestamped output directory per input file.
