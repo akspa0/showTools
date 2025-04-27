@@ -2,7 +2,7 @@
 pre and post-processing tools for audio. 
 
 ``whisperBite``
-mixing/whisperBite/whisperBite.py - Using OpenAI's whisper Turbo model, transcribe audio into soundbites, quickly and easily. Supports --url option with yt-dlp as a backend, along with Demucs to split vocal audio.
+Moved to: [WhisperBite Repo](https://github.com/akspa0/WhisperBite)
 
 mixing/miscAudioTools/merge_audio.py - Quick script to merge Vocal and Instrument tracks into a single stereo audio track.
 
