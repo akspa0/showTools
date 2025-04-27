@@ -14,10 +14,13 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
         model (str): Demucs model to use (htdemucs, htdemucs_ft, mdx, mdx_extra)
         
     Returns:
-        str: Path to the extracted vocals file
+        tuple(str, str): Paths to the extracted (vocals_file, no_vocals_file).
+                         no_vocals_file will be None if not found/created.
     """
     demucs_output_dir = os.path.join(output_dir, "demucs")
     os.makedirs(demucs_output_dir, exist_ok=True)
+    final_vocals_file = None
+    final_no_vocals_file = None
 
     try:
         logging.info(f"Running Demucs ({model}) on {input_audio}")
@@ -93,6 +96,7 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
             no_vocals_file = os.path.join(vocals_dir, "no_vocals.wav")
             if os.path.exists(no_vocals_file):
                 final_no_vocals_file = os.path.join(demucs_output_dir, f"{input_base_name}_no_vocals.wav")
+                logging.info(f"[Demucs Output] Copying {no_vocals_file} to {final_no_vocals_file}")
                 shutil.copy2(no_vocals_file, final_no_vocals_file)
                 
             # Also copy any other interesting stems we find
@@ -102,22 +106,22 @@ def separate_vocals_with_demucs(input_audio, output_dir, model="htdemucs"):
                     final_stem_file = os.path.join(demucs_output_dir, f"{input_base_name}_{stem}.wav")
                     shutil.copy2(stem_file, final_stem_file)
         
-        logging.info(f"[Demucs Success] Vocal separation completed successfully. File saved to {final_vocals_file}")
-        return final_vocals_file
+        logging.info(f"[Demucs Success] Vocal separation completed successfully. Vocals: {final_vocals_file}, No Vocals: {final_no_vocals_file}")
+        return final_vocals_file, final_no_vocals_file
         
     except subprocess.CalledProcessError as e:
         logging.error(f"Demucs process error: {e}")
         logging.error(f"Demucs command: {' '.join(e.cmd)}") # Log the command that failed
         logging.error(f"Demucs stderr: {e.stderr}")
-        raise
+        return None, None
     except FileNotFoundError:
         # Catch if 'demucs' command is truly not found in PATH
         logging.error("Demucs command not found. Please ensure demucs is installed in the active environment and the environment's scripts/bin directory is in your system PATH.")
         logging.error("Install with 'pip install demucs'")
-        raise # Re-raise the error to be caught by whisperBite.py
+        return None, None
     except Exception as e:
         logging.error(f"Error during vocal separation: {e}")
-        raise
+        return None, None
 
 def enhance_vocals(vocals_file, output_dir):
     """

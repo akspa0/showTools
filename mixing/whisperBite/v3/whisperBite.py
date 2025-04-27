@@ -11,6 +11,7 @@ import torch
 from pydub import AudioSegment
 from utils import sanitize_filename, download_audio, zip_results
 from vocal_separation import separate_vocals_with_demucs
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -553,7 +554,9 @@ def extract_audio_from_video(video_path, output_wav_path):
         logging.error(f"An unexpected error occurred during audio extraction: {e}")
         return False
 
-def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers, auto_speakers=True, enable_word_extraction=False, enable_second_pass=False):
+def process_audio(input_path, output_dir, model_name, enable_vocal_separation, num_speakers, 
+                  auto_speakers=False, enable_word_extraction=False, enable_second_pass=False,
+                  attempt_sound_detection=False):
     """Unified pipeline for audio processing."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
@@ -627,21 +630,36 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         
         # The rest of the pipeline uses the *normalized* file path
         pipeline_audio_input = normalized_file
-
+        no_vocals_path = None # Initialize path for non-vocal track
+        
         # 2. Optional vocal separation
         if enable_vocal_separation:
             logging.info("Attempting vocal separation")
             try:
                 logging.info(f"[Vocal Separation] Calling separate_vocals_with_demucs with input: {pipeline_audio_input}")
-                vocals_file = separate_vocals_with_demucs(pipeline_audio_input, final_output_dir) # Use normalized file
-                logging.info(f"[Vocal Separation] separate_vocals_with_demucs returned: {vocals_file}")
+                # Now receives a tuple: (vocals_path, no_vocals_path)
+                vocals_file, no_vocals_path_returned = separate_vocals_with_demucs(pipeline_audio_input, final_output_dir)
+                logging.info(f"[Vocal Separation] separate_vocals_with_demucs returned: Vocals={vocals_file}, NoVocals={no_vocals_path_returned}")
+                
+                # Update main pipeline input if vocals file is valid
                 if vocals_file and os.path.exists(vocals_file):
                     pipeline_audio_input = vocals_file # Update input for next steps
                     logging.info(f"[Vocal Separation] Successfully updated pipeline_audio_input to: {pipeline_audio_input}")
                 else:
                     logging.warning("Vocal separation failed or produced no output, using normalized audio for subsequent steps.")
+                
+                # Store the no_vocals path if valid
+                if no_vocals_path_returned and os.path.exists(no_vocals_path_returned):
+                    no_vocals_path = no_vocals_path_returned
+                    logging.info(f"[Vocal Separation] Found valid no_vocals track: {no_vocals_path}")
+                else:
+                    logging.info("[Vocal Separation] No valid no_vocals track found or returned.")
+                    no_vocals_path = None # Ensure it's None
+
             except Exception as e:
                 logging.warning(f"Vocal separation error: {e}. Using normalized audio for subsequent steps.")
+                vocals_file = None # Ensure these are None on error
+                no_vocals_path = None
         
         # 3. Speaker diarization (use the potentially separated vocals)
         speaker_output_dir = os.path.join(final_output_dir, "speakers")
@@ -667,6 +685,44 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
         # Transcribe_with_whisper now returns the flattened list of first-pass segments
         first_pass_segments = transcribe_with_whisper(model, segment_info_dict, final_output_dir, enable_word_extraction=enable_word_extraction)
         logging.info("Transcription complete")
+
+        # --- Attempt Sound Detection on Non-Vocal Track --- 
+        sound_event_segments = []
+        if enable_vocal_separation and attempt_sound_detection and no_vocals_path:
+            logging.info(f"Attempting sound detection on non-vocal track: {no_vocals_path}")
+            try:
+                # Use the same Whisper model for now
+                no_vocals_transcription = model.transcribe(no_vocals_path, word_timestamps=True) # Get segments
+                
+                # Regex to find segments that ONLY contain bracketed tags
+                bracket_pattern = re.compile(r"^\[\s*.*\s*\]$|\(.*\)|♪.*♪") # Match [.*], (.*), or ♪.*♪
+                
+                if 'segments' in no_vocals_transcription:
+                    for segment in no_vocals_transcription['segments']:
+                        text = segment['text'].strip()
+                        # Check if the entire segment text matches the bracket pattern
+                        if text and bracket_pattern.fullmatch(text):
+                            logging.info(f"  [Sound Detect] Found potential sound event: {text} at {segment['start']:.2f}s - {segment['end']:.2f}s")
+                            sound_event_segments.append({
+                                'speaker': 'SOUND', # Special label for sound events
+                                'start': segment['start'],
+                                'end': segment['end'],
+                                'text': text, # Keep the detected tag
+                                'audio_file': None, # No specific audio file for sound event
+                                'transcript_file': None,
+                                'sequence': -1 # Indicate it's not a regular sequence
+                            })
+                logging.info(f"Sound detection finished. Found {len(sound_event_segments)} potential sound events.")
+            except Exception as sound_err:
+                logging.error(f"Error during sound detection on {no_vocals_path}: {sound_err}")
+        else:
+            if not enable_vocal_separation:
+                logging.info("Skipping sound detection: Vocal separation not enabled.")
+            elif not attempt_sound_detection:
+                logging.info("Skipping sound detection: Option not enabled.")
+            elif not no_vocals_path:
+                logging.info("Skipping sound detection: No non-vocal track available.")
+        # --- End Sound Detection --- 
 
         final_segments_for_transcript = first_pass_segments # Default to first pass
         refined_segments_info = [] # Initialize
@@ -750,7 +806,14 @@ def process_audio(input_path, output_dir, model_name, enable_vocal_separation, n
             logging.info("Second pass refinement skipped.")
             # Keep final_segments_for_transcript as first_pass_segments
 
-        # --- Write the final master transcript --- 
+        # --- Add Sound Events to the final list BEFORE sorting --- 
+        if sound_event_segments:
+            logging.info(f"Adding {len(sound_event_segments)} detected sound events to the transcript list.")
+            final_segments_for_transcript.extend(sound_event_segments)
+        
+        # --- Sort the combined list (speech + sound) and Write the final master transcript --- 
+        logging.info(f"Sorting final transcript list containing {len(final_segments_for_transcript)} segments (speech + sound)...")
+        final_segments_for_transcript.sort(key=lambda x: x['start'])
         master_transcript_path = os.path.join(final_output_dir, "master_transcript.txt")
         master_transcript_content = ""
         for i, segment in enumerate(final_segments_for_transcript):
@@ -839,7 +902,7 @@ def main():
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output files.')
     parser.add_argument('--model', type=str, default="base", help='Whisper model to use (default: base).')
     parser.add_argument('--num_speakers', type=int, default=2, help='Number of speakers for diarization (default: 2).')
-    parser.add_argument('--auto_speakers', action='store_true', help='Automatically detect optimal speaker count.')
+    parser.add_argument('--auto_speakers', action='store_true', help='Automatically detect optimal speaker count (Default: Disabled).')
     parser.add_argument('--enable_vocal_separation', action='store_true', help='Enable vocal separation using Demucs.')
     parser.add_argument('--enable_word_extraction', action='store_true', help='Enable extraction of individual word audio snippets.')
     parser.add_argument('--enable_second_pass', action='store_true', help='Enable second pass diarization for refinement (experimental).')
