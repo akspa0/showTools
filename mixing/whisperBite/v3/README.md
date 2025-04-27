@@ -1,22 +1,23 @@
 # WhisperBite
 
-WhisperBite is a tool built with Gradio that processes audio and video files to perform speaker diarization (identifying who spoke when) and transcription using OpenAI's Whisper model. It can handle various inputs, separate vocals, extract individual words, and refine results with a second pass.
+WhisperBite is a tool built with Gradio that processes audio and video files to perform speaker diarization (identifying who spoke when) and transcription using OpenAI's Whisper model. It can handle various inputs, separate vocals, identify non-speech sounds, extract individual words, and refine results with a second pass.
 
 ## Features
 
 *   **Input:** Accepts single audio/video files, folders (processes newest file), or URLs (YouTube, direct links).
 *   **Audio Extraction:** Automatically extracts audio from video inputs.
 *   **Normalization:** Normalizes audio loudness to a standard level.
-*   **Vocal Separation (Optional):** Uses Demucs to separate vocals from background noise/music.
-*   **Speaker Diarization:** Identifies different speakers using `pyannote.audio`.
+*   **Vocal Separation (Optional):** Uses Demucs to separate vocals from background noise/music. Generates `vocals.wav` and `no_vocals.wav` tracks.
+*   **Sound Detection (Optional):** If Vocal Separation is enabled, can attempt to identify non-speech sounds (e.g., `[ music ]`, `( noise )`) by running Whisper on the `no_vocals.wav` track.
+*   **Speaker Diarization:** Identifies different speakers using `pyannote.audio` (labels formatted as `S0`, `S1`, etc.).
 *   **Transcription:** Transcribes the speech for each identified speaker using Whisper.
 *   **Output:** Creates:
-    *   Individual audio segments per speaker turn.
+    *   Individual audio segments per speaker turn (using `S0`, `S1`... naming).
     *   Text transcripts per speaker turn.
-    *   A master transcript combining all speakers chronologically.
+    *   A master transcript combining speech segments and detected sound events chronologically.
     *   Optional individual word audio snippets with timestamps.
     *   A zip file containing all results.
-*   **Second Pass Refinement (Optional):** Re-analyzes longer segments to potentially improve speaker separation accuracy.
+*   **Second Pass Refinement (Optional):** Re-analyzes longer segments to potentially improve speaker separation accuracy. Attempts to merge refined segments into the master transcript, replacing the originals.
 
 ## Prerequisites
 
@@ -26,6 +27,7 @@ WhisperBite is a tool built with Gradio that processes audio and video files to 
     *   **macOS (using Homebrew):** `brew install ffmpeg`
     *   **Linux (using apt):** `sudo apt update && sudo apt install ffmpeg`
 3.  **PyTorch:** The `requirements.txt` file lists `torch`. Depending on your system (CPU-only or GPU with CUDA), you might need a specific version. Check the [PyTorch website](https://pytorch.org/get-started/locally/) for the correct installation command for your setup.
+4.  **Demucs (Optional but Recommended):** Required for the Vocal Separation and Sound Detection features. Install via pip: `pip install demucs`.
 
 ## Setup
 
@@ -48,6 +50,7 @@ WhisperBite is a tool built with Gradio that processes audio and video files to 
     ```bash
     pip install -r requirements.txt
     ```
+    This installs core libraries like `gradio`, `openai-whisper`, `pyannote.audio`, `torch`, `pydub`, `demucs` (optional features), and `yt-dlp` (for URL downloads).
     *Note: If you encounter issues with PyTorch, install it manually first using the command from the PyTorch website, then run the command above again.*
 
 4.  **Hugging Face Token:**
@@ -65,12 +68,14 @@ Once setup is complete, run the Gradio application:
 python app.py
 ```
 
-This will start a local web server. Open the provided URL (usually `http://127.0.0.1:7860`) in your browser to use the interface.
+This will start a local web server. Open the provided URL (usually `http://127.0.0.1:7860`) in your browser to use the interface. Select your input, choose processing options (including the new "Attempt Sound Detection" checkbox if vocal separation is enabled), and click "Process Audio".
 
 ## Notes
 
-*   **Vocal Separation:** Requires `demucs` to be installed (`pip install demucs`). If enabled, separation is performed once on the normalized audio *before* the first diarization pass. The second pass refinement (if enabled) uses segments derived from this initially separated audio.
-*   **Second Pass:** This feature analyzes segments longer than 5 seconds from the first pass to try and refine speaker labels. It can be time-consuming.
+*   **Speaker Labels:** Speaker labels in output directories and transcripts use the format `S0`, `S1`, `S2`, etc.
+*   **Vocal Separation:** Requires `demucs` (install via `pip install demucs`). If enabled, separation runs once before diarization. The resulting `vocals.wav` is used for speaker diarization and transcription.
+*   **Sound Detection:** This option requires Vocal Separation to be enabled. It runs the selected Whisper model on the `no_vocals.wav` track generated by Demucs and looks for segments containing only bracketed tags (like `[ music ]`, `[ sound ]`), parenthesized text, or musical notes (`♪`). These are added to the master transcript with the speaker label `SOUND`. Accuracy depends on Whisper's ability to tag these sounds.
+*   **Second Pass:** Analyzes longer first-pass segments to refine speaker labels. The master transcript attempts to merge these refinements, replacing the original segments. (Note: The merging logic is complex and may sometimes result in duplicates - further refinement is ongoing).
 *   **Resource Usage:** Whisper models (especially larger ones) and Demucs can be computationally intensive and require significant RAM/VRAM.
 
 ## License

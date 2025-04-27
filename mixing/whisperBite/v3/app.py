@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 def run_pipeline(input_file, input_folder, url, output_folder, model, num_speakers, 
                 auto_speakers, enable_vocal_separation, 
                 enable_word_extraction, enable_second_pass, 
+                attempt_sound_detection,
                 hf_token):
     """Run the audio processing pipeline based on user inputs."""
     logging.info("Starting pipeline run...")
@@ -71,7 +72,7 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
 
     # Run the processing pipeline
     try:
-        logging.info(f"Calling process_audio with options: model={model}, num_speakers={num_speakers}, auto={auto_speakers}, separation={enable_vocal_separation}, words={enable_word_extraction}, second_pass={enable_second_pass}")
+        logging.info(f"Calling process_audio with options: model={model}, num_speakers={num_speakers}, auto={auto_speakers}, separation={enable_vocal_separation}, words={enable_word_extraction}, second_pass={enable_second_pass}, sound_detect={attempt_sound_detection}")
         # Pass the new arguments
         result_dir = process_audio(
             input_path=input_path,
@@ -80,8 +81,9 @@ def run_pipeline(input_file, input_folder, url, output_folder, model, num_speake
             enable_vocal_separation=enable_vocal_separation,
             num_speakers=num_speakers,
             auto_speakers=auto_speakers,
-            enable_word_extraction=enable_word_extraction, # Pass new arg
-            enable_second_pass=enable_second_pass      # Pass new arg
+            enable_word_extraction=enable_word_extraction,
+            enable_second_pass=enable_second_pass,
+            attempt_sound_detection=attempt_sound_detection
         )
 
         if not result_dir or not os.path.isdir(result_dir):
@@ -236,7 +238,7 @@ def build_interface():
                 with gr.Row():
                     auto_speakers = gr.Checkbox(
                         label="Auto-detect Speaker Count", 
-                        value=True,
+                        value=False,
                         info="Automatically determine optimal speaker count"
                     )
                     
@@ -258,6 +260,14 @@ def build_interface():
                         value=False, 
                         info="Re-analyze initial segments to improve speaker separation (experimental)"
                     )
+                
+                # Add Sound Detection Checkbox (conditionally visible/interactive)
+                attempt_sound_detection = gr.Checkbox(
+                    label="Attempt Sound Detection (Non-Vocal Track)", 
+                    value=False,
+                    info="Requires Vocal Separation. Tries to identify non-speech sounds.",
+                    interactive=False # Initially disabled
+                )
 
                 hf_token = gr.Textbox(
                     label="Hugging Face Token (Required)", 
@@ -279,11 +289,22 @@ def build_interface():
                 input_file, input_folder, url, output_folder, model, 
                 num_speakers, auto_speakers, enable_vocal_separation,
                 enable_word_extraction, enable_second_pass,
+                attempt_sound_detection,
                 hf_token
             ],
             outputs=[output_message, result_file, transcript_preview]
         )
         
+        # Make Sound Detection checkbox interactive only if Vocal Separation is checked
+        def update_sound_detection_interactivity(vocal_sep_enabled):
+            return gr.Checkbox(interactive=vocal_sep_enabled)
+
+        enable_vocal_separation.change(
+            fn=update_sound_detection_interactivity,
+            inputs=enable_vocal_separation,
+            outputs=attempt_sound_detection
+        )
+
         # Add sample URLs only since file examples cause issues
         gr.Markdown("""
         ### Sample URLs to try:
