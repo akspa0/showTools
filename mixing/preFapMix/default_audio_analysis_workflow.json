@@ -1,0 +1,91 @@
+{
+    "name": "DefaultAudioAnalysisWorkflow",
+    "description": "A default workflow for audio analysis: CLAP -> Preprocess -> Diarize -> Transcribe -> LLM Summary.",
+    "stages": [
+        {
+            "stage_name": "clap_event_annotation",
+            "module": "clap_module",
+            "function": "run_clap_annotation",
+            "inputs": {
+                "input_audio_path": "{workflow.original_input_audio_file}",
+                "output_dir_str": "{workflow.current_stage_output_dir}"
+            },
+            "config": {
+                "clap_prompts": ["telephone ringing", "telephone hang-up tones", "dtmf tones"],
+                "clap_confidence_threshold": 0.6,
+                "clap_separator_model": null
+            },
+            "outputs": {
+                "clap_events_file": "return_value[clap_events_file]"
+            }
+        },
+        {
+            "stage_name": "audio_preprocessing",
+            "module": "audio_preprocessor",
+            "function": "run_generic_preprocess",
+            "inputs": {
+                "input_audio_path_str": "{workflow.original_input_audio_file}",
+                "base_output_dir_str": "{workflow.current_stage_output_dir}"
+            },
+            "config": {
+                "target_sr_hz": 16000,
+                "vocals_lufs": -3.0,
+                "instrumental_lufs": -14.0,
+                "audio_separator_model": "UVR_MDXNET_Main" 
+            },
+            "outputs": {
+                "processed_stems_info": "return_value"
+            }
+        },
+        {
+            "stage_name": "speaker_diarization",
+            "module": "diarization_module",
+            "function": "run_diarization",
+            "inputs": {
+                "vocal_stem_path": "{stages.audio_preprocessing[processed_stems_info][vocals_normalized]}",
+                "output_dir_str": "{workflow.current_stage_output_dir}"
+            },
+            "config": {
+                "diarization_model_name": "pyannote/speaker-diarization-3.1",
+                "num_speakers": 2
+            },
+            "outputs": {
+                "rttm_file": "return_value[rttm_file_path]"
+            }
+        },
+        {
+            "stage_name": "transcription",
+            "module": "transcription_module",
+            "function": "run_transcription",
+            "inputs": {
+                "vocal_stem_path": "{stages.audio_preprocessing[processed_stems_info][vocals_normalized]}",
+                "diarization_file_path": "{stages.speaker_diarization[rttm_file]}",
+                "output_dir_str": "{workflow.current_stage_output_dir}"
+            },
+            "config": {
+                "whisper_model_name": "base",
+                "min_slice_duration_ms": 500
+            },
+            "outputs": {
+                "transcript_file": "return_value[transcript_json_path]"
+            }
+        },
+        {
+            "stage_name": "llm_summary_and_analysis",
+            "module": "llm_module",
+            "function": "run_llm_summary",
+            "inputs": {
+                "transcript_file_path": "{stages.transcription[transcript_file]}",
+                "clap_events_file_path": "{stages.clap_event_annotation[clap_events_file]}",
+                "diarization_file_path": "{stages.speaker_diarization[rttm_file]}",
+                "output_dir_str": "{workflow.current_stage_output_dir}"
+            },
+            "config": {
+                "lm_studio_model_identifier": "nidum-gemma-3-4b-it-uncensored"
+            },
+            "outputs": {
+                "summary_file": "return_value[summary_text_file_path]"
+            }
+        }
+    ]
+} 
