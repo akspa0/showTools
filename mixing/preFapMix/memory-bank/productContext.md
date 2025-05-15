@@ -1,41 +1,38 @@
-# Product Context
+# Product Context for PreFapMix
 
 ## Problem Statement
-Audio recordings from various sources (often at 8kHz) need to be processed, mixed (for calls), transcribed, and analyzed. Key challenges include:
-1. Ensuring high-quality audio processing, including proper resampling, stem separation, and loudness normalization.
-2. Using up-to-date transcription and diarization technologies for accuracy.
-3. Organizing outputs logically, especially for paired call data (`recv_out`/`trans_out`), in a PII-safe manner.
-4. Providing detailed, speaker-segmented transcriptions along with corresponding audio soundbites for easy review and use, similar to the output style of `whisperBite.py`.
-5. Generating useful summaries or analyses from the transcribed conversations.
 
-## Solution: The "PreFapMix" Workflow System
-This project implements a modular, workflow-driven system (`workflow_executor.py` and `call_processor.py`) to:
-1.  **Process Individual Audio Streams (`workflow_executor.py`):**
-    *   Detect sound events (CLAP).
-    *   Separate vocals from instrumentals (`audio_preprocessor.py`).
-    *   Normalize vocal and instrumental stems to target LUFS values.
-    *   Diarize speaker segments using `pyannote.audio` (`diarization_module.py`).
-    *   Transcribe vocals using `openai-whisper`, guided by diarization (`transcription_module.py`).
-        *   **Target Output:** This module is being enhanced to produce individual audio soundbites (`.wav`) and text files (`.txt`) for each speaker segment, organized into speaker-specific subdirectories (e.g., `S0/`, `S1/`) with content-derived filenames (e.g., `0001_some_words.wav`). This mirrors the desired output style of `whisperBite.py`.
-    *   Generate per-stream summaries using a local LLM via LM Studio (`llm_module.py`).
-    *   Maintain PII-safe naming for all intermediate outputs using timestamp-based identifiers (e.g., `call_YYYYMMDD-HHMMSS`).
-2.  **Aggregate and Finalize Call Data (`call_processor.py`):**
-    *   Identify and pair processed `recv_out` and `trans_out` streams based on their PII-safe call ID.
-    *   Mix audio from paired vocal stems into a stereo file.
-    *   Merge JSON transcripts from paired streams.
-    *   **Target:** Copy the detailed soundbite structures (speaker subdirectories with `.wav` and `.txt` files) from the transcription stage of each stream into the final call output directory.
-    *   Generate a combined LLM summary for the entire call.
-    *   Save all final outputs into a PII-safe call-specific directory (e.g., `processed_calls_test/call_YYYYMMDD-HHMMSS/`).
+Processing multi-speaker audio recordings, especially paired call center data (`recv_out`, `trans_out`), for analysis and review is often a manual, time-consuming, and error-prone process. Key challenges include:
 
-## User Experience Goals
-- **Reliable and Consistent Output Quality:** Clear audio, accurate transcription and diarization.
-- **Detailed and Usable Transcription Output:** Beyond a single JSON, provide individual speaker audio soundbites and their text, mirroring `whisperBite.py`'s utility for review and further use.
-- **PII Safety:** Ensure all generated filenames and directory names are free of personally identifiable information, relying on timestamps for identification.
-- **Organized Outputs:** Logically structured output directories for individual stream processing runs and for final aggregated call data.
-- **CLI-Driven Workflow:** Robust command-line interface for both `workflow_executor.py` and (indirectly) `call_processor.py`.
-- **Minimal Configuration for Standard Use:** Sensible defaults for most workflow parameters.
+*   **Speaker Attribution:** Accurately identifying who said what in a conversation.
+*   **PII Safety:** Ensuring sensitive information from original filenames or content is not exposed in processed outputs.
+*   **Actionable Outputs:** Generating outputs that are immediately useful for various stakeholders (e.g., quality assurance, content creation, compliance). This includes needing clear, mixed audio, precise transcriptions, and quick summaries.
+*   **Navigability:** Difficulty in pinpointing specific moments or utterances within a long recording without detailed, segmented transcriptions.
+*   **Consistency:** Ensuring a consistent level of quality and format across all processed audio.
+
+## Solved Problems & Goals
+
+`PreFapMix` aims to solve these problems by providing an automated pipeline that:
+
+1.  **Ensures PII Safety:** Implements a robust PII-safe naming convention for all intermediate and final files, typically based on a generated call timestamp (e.g., `call_YYYYMMDD-HHMMSS`).
+2.  **Automates Processing:** Automates the workflow of audio separation, normalization, speaker diarization, transcription, and summarization.
+3.  **Provides Detailed Transcriptions with Soundbites:** Generates not only full transcripts but also individual soundbite audio files (`.wav`) and corresponding text files (`.txt`) for each speaker segment. These soundbites are named using a PII-safe convention (sequence number and sanitized first few words of the utterance) and organized into speaker-specific subfolders, similar to the output of the `whisperBite.py` tool. This allows for easy access to and verification of specific utterances.
+4.  **Facilitates Call Review:** For paired recordings, it mixes the `recv` and `trans` vocal stems into a clear stereo audio file, merges their respective transcripts (maintaining speaker identity and soundbite references), and produces a combined LLM-generated summary of the entire call.
+5.  **Delivers Actionable Insights:** Provides LLM-generated summaries for individual streams and combined calls, offering quick insights into the conversation content.
+6.  **Standardizes Outputs:** Ensures all outputs are consistently formatted and organized.
+
+## Desired User Experience
+
+*   **Reliability:** The pipeline should consistently process audio files and produce accurate outputs.
+*   **Ease of Use:** The system should be operable via a straightforward command-line interface with clear configuration options (e.g., through JSON workflow files).
+*   **Navigable Outputs:** The output directory structure and file naming should be logical and easy to understand, allowing users to quickly find the information they need (e.g., mixed audio, specific speaker soundbites, full transcripts, summaries).
+*   **Configurability:** Users should be able to configure aspects of the workflow, such as the models used for separation, diarization, transcription, and LLM summarization, as well as parameters like target loudness.
+*   **Efficiency:** The pipeline should process audio in a reasonably timely manner.
+*   **Transparency:** Clear logging should provide insight into the processing steps and any issues encountered.
 
 ## Target Users
-- Analysts needing to process, transcribe, and review call recordings or other audio communications.
-- Users requiring detailed, speaker-segmented audio soundbites alongside transcriptions.
-- Anyone needing to apply a consistent audio processing pipeline (separation, normalization, diarization, transcription, LLM summary) to a batch of audio files or call data. 
+
+*   Call center quality assurance teams.
+*   Content analysts and creators who need to review and extract information from audio recordings.
+*   Compliance officers needing to review call data.
+*   Anyone needing to process and understand multi-speaker audio recordings efficiently and safely.
