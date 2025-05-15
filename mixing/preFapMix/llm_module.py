@@ -152,19 +152,57 @@ Please generate a summary of the conversation:
     final_summary_file_path = output_dir / "final_analysis_summary.txt"
 
     try:
-        logger.info(f"[LLM Summary] Initializing LM Studio client for model: {lm_studio_model_identifier}")
-        model = lms.llm(lm_studio_model_identifier) # Using the convenience API from lmstudio
-        
-        logger.info(f"[LLM Summary] Sending request to LM Studio model: {lm_studio_model_identifier}")
-        response_text = model.respond(prompt) # model.respond returns the string directly
-        
-        summary_content = response_text.strip()
-        logger.info(f"[LLM Summary] Successfully received summary from LM Studio model.")
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing LM Studio client for model: {lm_studio_model_identifier}")
+        # --- Refactored Client Usage ---
+        # Default client, assumes LM Studio server at http://localhost:1234/v1
+        # One could make base_url configurable if needed: base_url=config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+        client = lms.LMSClient() 
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LMSClient initialized. Default base_url: {client.base_url}")
 
-    except Exception as e_llm: # Broad exception for LM Studio client/model errors
-        summary_content = f"LM Studio Error: {e_llm}. Ensure LM Studio is running and the model '{lm_studio_model_identifier}' is loaded/served."
-        logger.error(f"[LLM Summary] LM Studio client or model interaction error: {e_llm}")
-        logger.error(f"[LLM Summary] Make sure LM Studio server is running and model '{lm_studio_model_identifier}' is available.")
+        messages = [
+            {"role": "system", "content": "You are an AI assistant. Your task is to provide a concise summary of the following conversation transcript. Incorporate information about notable sound events if they provide relevant context."},
+            {"role": "user", "content": f"Conversation Transcript:\n---\n{transcript_prompt_text}\n---\n\nNotable Sound Events Information:\n---\n{clap_events_prompt_text}\n---\n\nPlease generate a summary of the conversation:"}
+        ]
+        
+        # Configurable parameters for the chat completion, e.g., temperature, max_tokens
+        temperature = config.get('lm_studio_temperature', 0.7)
+        max_tokens = config.get('lm_studio_max_tokens', 500) # Defaulting to a reasonable max for summaries
+
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Sending request to LM Studio model: {lm_studio_model_identifier}. Temp: {temperature}, MaxTokens: {max_tokens}")
+        
+        completion = client.get_chat_completion(
+            model=lm_studio_model_identifier,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            # stream=False # Default is False for get_chat_completion
+        )
+        
+        # Extract response
+        if completion and completion.get('choices') and isinstance(completion['choices'], list) and len(completion['choices']) > 0:
+            message_content = completion['choices'][0].get('message', {}).get('content')
+            if message_content:
+                summary_content = message_content.strip()
+                logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Successfully received summary from LM Studio model.")
+            else:
+                summary_content = "LM Studio Error: Received empty message content from model."
+                logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}. Full API response: {completion}")
+        else:
+            summary_content = f"LM Studio Error: Unexpected response structure from model '{lm_studio_model_identifier}'. Check LM Studio logs."
+            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}. Full API response: {completion}")
+        # --- End Refactored Client Usage ---
+
+    except lms.errors.APIConnectionError as e_conn:
+        summary_content = f"LM Studio Connection Error: {e_conn}. Ensure LM Studio server is running at the expected address (likely http://localhost:1234/v1) and is accessible."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
+    except lms.errors.LMStudioSDKError as e_sdk: # Catch other SDK specific errors
+        summary_content = f"LM Studio SDK Error: {e_sdk}. Model: '{lm_studio_model_identifier}'."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
+    except Exception as e_llm: # Broad exception for other errors
+        # The original error message included the model identifier and a hint to check if it's loaded.
+        # We should try to preserve that if possible, or make the new error equally informative.
+        summary_content = f"LM Studio Error: An unexpected error occurred: {e_llm}. Ensure LM Studio is running, the model '{lm_studio_model_identifier}' is loaded/served, and the server is accessible."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio client or model interaction error: {e_llm}", exc_info=True)
 
     try:
         with open(final_summary_file_path, 'w', encoding='utf-8') as f:

@@ -37,6 +37,9 @@ AUDIO_PREPROCESSING_STAGE_KEYWORD = "audio_preprocessing"
 TRANSCRIPTION_STAGE_KEYWORD = "transcription"
 LLM_SUMMARY_STAGE_KEYWORD = "llm_summary_and_analysis" # Matches "04_llm_summary_and_analysis"
 
+# Pattern for speaker directories (e.g., S0, S1, SPEAKER_00)
+SPEAKER_DIR_PATTERN = re.compile(r"^(S\d+|SPEAKER_\d+)$")
+
 def setup_logging(log_level_str='INFO'):
     """Configures logging for the application."""
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
@@ -50,7 +53,7 @@ def setup_logging(log_level_str='INFO'):
 def generate_call_id_from_workflow_dir_name(dir_name: str):
     """
     Extracts a potential call_id from a workflow executor output directory name.
-    Example dir_name: DefaultAudioAnalysisWorkflow_recv_out-01166627677111-725-20250512-020958-1747015798.308_20250515_103000
+    Example dir_name: DefaultAudioAnalysisWorkflow_recv_out-188855512121-725-20250512-020958-1747015798.308_20250515_103000
     We want to extract something like: call_20250512-020958
     This is an adaptation of the logic in audiotoolkit_phase1.py's generate_call_id.
     """
@@ -62,8 +65,8 @@ def generate_call_id_from_workflow_dir_name(dir_name: str):
         # This might be if workflow name itself has underscores. Let's try to find the timestamp directly from original part.
         # Look for original filename patterns directly if the first regex fails
         # Often workflow_dir name is like: WORKFLOWNAME_ORIGINALFILESTEM_RUNDATETIME
-        # Example: DefaultAudioAnalysisWorkflow_recv_out-01166627677111-725-20250512-020958-1747015798.308_20240515_120000
-        # The part we are interested in is 'recv_out-01166627677111-725-20250512-020958-1747015798.308'
+        # Example: DefaultAudioAnalysisWorkflow_recv_out-188855512121-725-20250512-020958-1747015798.308_20240515_120000
+        # The part we are interested in is 'recv_out-188855512121-725-20250512-020958-1747015798.308'
         
         # Attempt to extract known prefixes and the timestamp part from them.
         # This regex is designed to find "recv_out" or "trans_out" followed by the specific timestamp format.
@@ -232,6 +235,54 @@ def _mix_stereo_vocals(recv_vocal_path: Path, trans_vocal_path: Path, output_mix
         return False
 
 
+def _copy_soundbite_directories(
+    workflow_run_dir: Path, 
+    transcription_stage_keyword: str, 
+    call_output_dir: Path, 
+    stream_prefix: str, 
+    call_id_for_logging: str
+) -> bool:
+    """
+    Copies speaker-specific soundbite directories (e.g., S0, S1) from the transcription stage
+    of a workflow run directory to the final call output directory.
+    The speaker directories in the destination will be prefixed (e.g., RECV_S0).
+    """
+    if not workflow_run_dir or not workflow_run_dir.is_dir():
+        logger.warning(f"[{call_id_for_logging}] Workflow run directory '{workflow_run_dir}' is invalid or not found for copying soundbites.")
+        return False
+
+    transcription_stage_dir = None
+    for item in workflow_run_dir.iterdir():
+        if item.is_dir() and transcription_stage_keyword in item.name.lower(): # Ensure case-insensitive keyword check
+            transcription_stage_dir = item
+            break
+    
+    if not transcription_stage_dir:
+        logger.warning(f"[{call_id_for_logging}] No transcription stage directory found containing keyword '{transcription_stage_keyword}' in '{workflow_run_dir}'. Cannot copy soundbites.")
+        return False
+
+    logger.info(f"[{call_id_for_logging}] Found transcription stage directory: {transcription_stage_dir}. Searching for speaker soundbite directories.")
+    
+    copied_any = False
+    for speaker_dir in transcription_stage_dir.iterdir():
+        if speaker_dir.is_dir() and SPEAKER_DIR_PATTERN.match(speaker_dir.name):
+            source_speaker_dir_path = speaker_dir
+            dest_speaker_dir_name = f"{stream_prefix}_{speaker_dir.name}"
+            dest_speaker_dir_path = call_output_dir / dest_speaker_dir_name
+            
+            try:
+                shutil.copytree(source_speaker_dir_path, dest_speaker_dir_path, dirs_exist_ok=True)
+                logger.info(f"[{call_id_for_logging}] Successfully copied soundbite directory '{source_speaker_dir_path.name}' to '{dest_speaker_dir_path}'.")
+                copied_any = True
+            except Exception as e:
+                logger.error(f"[{call_id_for_logging}] Error copying soundbite directory from '{source_speaker_dir_path}' to '{dest_speaker_dir_path}': {e}")
+    
+    if not copied_any:
+        logger.warning(f"[{call_id_for_logging}] No speaker soundbite directories (e.g., S0, S1) found or copied from '{transcription_stage_dir}'.")
+        
+    return copied_any
+
+
 def _merge_transcripts(recv_transcript_path: Path, trans_transcript_path: Path, output_merged_transcript_path: Path, call_id_for_logging: str) -> bool:
     """
     Merges two transcript JSON files (recv and trans) into a single chronological transcript.
@@ -323,120 +374,150 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
     # Example: tones_config = config.get('tones', {})
     # Example: mixing_config = config.get('mixing', {})
 
-    if job_details['type'] == 'pair':
-        recv_workflow_dir = job_details['recv_run_dir']
-        trans_workflow_dir = job_details['trans_run_dir']
-        logger.info(f"[{call_id}] PAIR: Recv workflow outputs in '{recv_workflow_dir}', Trans workflow outputs in '{trans_workflow_dir}'")
+    # --- Get run directories from job_details ---
+    recv_run_dir = job_details.get("recv_run_dir")
+    trans_run_dir = job_details.get("trans_run_dir")
 
-        # Retrieve files for RECV stream
-        recv_vocal_stem_path = _find_output_file(recv_workflow_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
-        recv_transcript_path = _find_output_file(recv_workflow_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
-        recv_summary_path = _find_output_file(recv_workflow_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
+    # --- Stage 2: Process RECV stream ---
+    recv_vocal_stem_path = None
+    recv_transcript_path = None
+    recv_summary_path = None
 
-        # Retrieve files for TRANS stream
-        trans_vocal_stem_path = _find_output_file(trans_workflow_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
-        trans_transcript_path = _find_output_file(trans_workflow_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
-        trans_summary_path = _find_output_file(trans_workflow_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
+    if recv_run_dir:
+        logger.info(f"[{call_id}] Processing RECV stream from: {recv_run_dir.name}")
+        recv_vocal_stem_path = _find_output_file(recv_run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
+        recv_transcript_path = _find_output_file(recv_run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
+        recv_summary_path = _find_output_file(recv_run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
+        
+        # Copy soundbites for RECV stream
+        _copy_soundbite_directories(
+            workflow_run_dir=recv_run_dir,
+            transcription_stage_keyword=TRANSCRIPTION_STAGE_KEYWORD.lower(),
+            call_output_dir=call_output_dir,
+            stream_prefix="RECV",
+            call_id_for_logging=call_id
+        )
 
-        # Copy retrieved files to call_output_dir for verification
-        if recv_vocal_stem_path:
-            shutil.copy2(recv_vocal_stem_path, call_output_dir / f"{call_id}_recv_{VOCAL_STEM_FILENAME}")
-            logger.info(f"[{call_id}] Copied recv vocal stem to output directory.")
-        if recv_transcript_path:
-            shutil.copy2(recv_transcript_path, call_output_dir / f"{call_id}_recv_{TRANSCRIPT_FILENAME}")
-            logger.info(f"[{call_id}] Copied recv transcript to output directory.")
-        if recv_summary_path: # Replaces previous direct copy
+        # Copy individual RECV summary if found
+        if recv_summary_path and recv_summary_path.exists():
             shutil.copy2(recv_summary_path, call_output_dir / f"{call_id}_recv_{SUMMARY_FILENAME}")
             logger.info(f"[{call_id}] Copied recv summary to output directory.")
 
-        if trans_vocal_stem_path:
-            shutil.copy2(trans_vocal_stem_path, call_output_dir / f"{call_id}_trans_{VOCAL_STEM_FILENAME}")
-            logger.info(f"[{call_id}] Copied trans vocal stem to output directory.")
-        if trans_transcript_path:
-            shutil.copy2(trans_transcript_path, call_output_dir / f"{call_id}_trans_{TRANSCRIPT_FILENAME}")
-            logger.info(f"[{call_id}] Copied trans transcript to output directory.")
-        if trans_summary_path: # Replaces previous direct copy
+    # --- Stage 3: Process TRANS stream ---
+    trans_vocal_stem_path = None
+    trans_transcript_path = None
+    trans_summary_path = None
+
+    if trans_run_dir:
+        logger.info(f"[{call_id}] Processing TRANS stream from: {trans_run_dir.name}")
+        trans_vocal_stem_path = _find_output_file(trans_run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
+        trans_transcript_path = _find_output_file(trans_run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
+        trans_summary_path = _find_output_file(trans_run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
+
+        # Copy soundbites for TRANS stream
+        _copy_soundbite_directories(
+            workflow_run_dir=trans_run_dir,
+            transcription_stage_keyword=TRANSCRIPTION_STAGE_KEYWORD.lower(),
+            call_output_dir=call_output_dir,
+            stream_prefix="TRANS",
+            call_id_for_logging=call_id
+        )
+
+        # Copy individual TRANS summary if found
+        if trans_summary_path and trans_summary_path.exists():
             shutil.copy2(trans_summary_path, call_output_dir / f"{call_id}_trans_{SUMMARY_FILENAME}")
             logger.info(f"[{call_id}] Copied trans summary to output directory.")
 
-        # Perform mixing of vocal stems if both are available
-        if recv_vocal_stem_path and trans_vocal_stem_path:
-            mixed_vocals_output_path = call_output_dir / f"{call_id}_{MIXED_VOCALS_FILENAME}"
-            mixing_successful = _mix_stereo_vocals(recv_vocal_stem_path, trans_vocal_stem_path, mixed_vocals_output_path, call_id)
-            if mixing_successful:
-                logger.info(f"[{call_id}] Vocal mixing completed for pair.")
-            else:
-                logger.warning(f"[{call_id}] Vocal mixing failed or was skipped for pair due to missing stems or ffmpeg error.")
-        else:
-            logger.warning(f"[{call_id}] Skipping vocal mixing for pair as one or both vocal stems were not found.")
-            
-        # Merge transcripts if both are available
-        if recv_transcript_path and trans_transcript_path:
-            merged_transcript_output_path = call_output_dir / f"{call_id}_{MERGED_TRANSCRIPT_FILENAME}"
-            merging_successful = _merge_transcripts(recv_transcript_path, trans_transcript_path, merged_transcript_output_path, call_id)
-            if merging_successful:
-                logger.info(f"[{call_id}] Transcript merging completed for pair.")
-            else:
-                logger.warning(f"[{call_id}] Transcript merging failed or was skipped for pair.")
-        else:
-            logger.warning(f"[{call_id}] Skipping transcript merging for pair as one or both transcript files were not found.")
-
-        # Generate combined summary if merged transcript is available and LLM is configured
-        if merged_transcript_output_path and merged_transcript_output_path.exists():
-            llm_model_id = config.get('llm_studio_model_identifier') # Ensure this key exists in your processing_config
-            
-            if llm_model_id:
-                llm_call_config = {
-                    "lm_studio_model_identifier": llm_model_id,
-                    # llm_module should handle context length internally or via more detailed config
-                }
-                system_prompt = "Based on the following conversation, write a story about what is going on."
-                
-                logger.info(f"[{call_id}] Attempting to generate combined summary using LLM.")
-                summary_file_path = generate_llm_summary(
-                    transcript_json_path=merged_transcript_output_path,
-                    system_prompt=system_prompt,
-                    llm_config=llm_call_config,
-                    output_dir=call_output_dir, # The llm_module function should use this
-                    output_filename=COMBINED_SUMMARY_FILENAME
-                )
-
-                if summary_file_path and summary_file_path.exists():
-                    logger.info(f"[{call_id}] Combined summary generated successfully at \'{summary_file_path}\'.")
-                else:
-                    logger.warning(f"[{call_id}] Combined summary generation failed or was skipped by the LLM module.")
-            else:
-                logger.warning(f"[{call_id}] Skipping combined summary generation as 'llm_studio_model_identifier' not found in config.")
-        elif job_details['type'] == 'pair': # Only if it was a pair type that could have a merged transcript
-             logger.warning(f"[{call_id}] Skipping combined summary generation as merged transcript was not available.")
-
-        # TODO: 
-        # 1. Files retrieved, mixed, merged. Combined summary attempted.
-        # 2. Next: Finalize output structure/saving (mostly done by individual steps). Review overall process.
+    # Handle single stream cases (not a pair but a single recv_out or trans_out)
+    elif job_details["type"] in ["single_recv", "single_trans", "single_unknown"]:
+        single_run_dir = job_details["run_dir"]
+        stream_type_prefix = "STREAM" # Default prefix
+        if job_details["type"] == "single_recv":
+            stream_type_prefix = "RECV"
+        elif job_details["type"] == "single_trans":
+            stream_type_prefix = "TRANS"
         
-    elif job_details['type'].startswith('single'):
-        single_workflow_dir = job_details['run_dir']
-        stream_type = job_details['type'].replace('single_', '') # recv, trans, or unknown
-        logger.info(f"[{call_id}] SINGLE ({job_details['type']}): Workflow outputs in '{single_workflow_dir}'")
+        logger.info(f"[{call_id}] Processing SINGLE ({job_details['type']}) stream from: {single_run_dir.name}")
         
-        vocal_stem_path = _find_output_file(single_workflow_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
-        transcript_path = _find_output_file(single_workflow_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
-        summary_path = _find_output_file(single_workflow_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
+        vocal_stem_path = _find_output_file(single_run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
+        transcript_path = _find_output_file(single_run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
+        summary_path = _find_output_file(single_run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
 
-        if vocal_stem_path:
-            shutil.copy2(vocal_stem_path, call_output_dir / f"{call_id}_{stream_type}_{VOCAL_STEM_FILENAME}")
-            logger.info(f"[{call_id}] Copied single ({stream_type}) vocal stem to output directory.")
+        # Copy soundbites for the single stream
+        _copy_soundbite_directories(
+            workflow_run_dir=single_run_dir,
+            transcription_stage_keyword=TRANSCRIPTION_STAGE_KEYWORD.lower(),
+            call_output_dir=call_output_dir,
+            stream_prefix=stream_type_prefix, # Use determined prefix
+            call_id_for_logging=call_id
+        )
+
+        # Copy vocal stem if found (rename to include prefix)
+        if vocal_stem_path and vocal_stem_path.exists():
+            shutil.copy2(vocal_stem_path, call_output_dir / f"{call_id}_{stream_type_prefix}_{VOCAL_STEM_FILENAME}")
+            logger.info(f"[{call_id}] Copied single ({stream_type_prefix}) vocal stem to output directory.")
         if transcript_path:
-            shutil.copy2(transcript_path, call_output_dir / f"{call_id}_{stream_type}_{TRANSCRIPT_FILENAME}")
-            logger.info(f"[{call_id}] Copied single ({stream_type}) transcript to output directory.")
+            shutil.copy2(transcript_path, call_output_dir / f"{call_id}_{stream_type_prefix}_{TRANSCRIPT_FILENAME}")
+            logger.info(f"[{call_id}] Copied single ({stream_type_prefix}) transcript to output directory.")
         if summary_path: # Replaces previous direct copy
-            shutil.copy2(summary_path, call_output_dir / f"{call_id}_{stream_type}_{SUMMARY_FILENAME}")
-            logger.info(f"[{call_id}] Copied single ({stream_type}) summary to output directory.")
+            shutil.copy2(summary_path, call_output_dir / f"{call_id}_{stream_type_prefix}_{SUMMARY_FILENAME}")
+            logger.info(f"[{call_id}] Copied single ({stream_type_prefix}) summary to output directory.")
 
-        # TODO:
-        # 1. Files retrieved. Next: Process/copy them as needed (already happening for copies).
-        #    Potentially perform single-stream specific processing if different from pairs.
+    # Perform mixing of vocal stems if both are available
+    if recv_vocal_stem_path and trans_vocal_stem_path:
+        mixed_vocals_output_path = call_output_dir / f"{call_id}_{MIXED_VOCALS_FILENAME}"
+        mixing_successful = _mix_stereo_vocals(recv_vocal_stem_path, trans_vocal_stem_path, mixed_vocals_output_path, call_id)
+        if mixing_successful:
+            logger.info(f"[{call_id}] Vocal mixing completed for pair.")
+        else:
+            logger.warning(f"[{call_id}] Vocal mixing failed or was skipped for pair due to missing stems or ffmpeg error.")
+    else:
+        logger.warning(f"[{call_id}] Skipping vocal mixing for pair as one or both vocal stems were not found.")
+        
+    # Merge transcripts if both are available
+    if recv_transcript_path and trans_transcript_path:
+        merged_transcript_output_path = call_output_dir / f"{call_id}_{MERGED_TRANSCRIPT_FILENAME}"
+        merging_successful = _merge_transcripts(recv_transcript_path, trans_transcript_path, merged_transcript_output_path, call_id)
+        if merging_successful:
+            logger.info(f"[{call_id}] Transcript merging completed for pair.")
+        else:
+            logger.warning(f"[{call_id}] Transcript merging failed or was skipped for pair.")
+    else:
+        logger.warning(f"[{call_id}] Skipping transcript merging for pair as one or both transcript files were not found.")
+
+    # Generate combined summary if merged transcript is available and LLM is configured
+    if merged_transcript_output_path and merged_transcript_output_path.exists():
+        llm_model_id = config.get('llm_studio_model_identifier') # Ensure this key exists in your processing_config
+        
+        if llm_model_id:
+            llm_call_config = {
+                "lm_studio_model_identifier": llm_model_id,
+                # llm_module should handle context length internally or via more detailed config
+            }
+            system_prompt = "Based on the following conversation, write a story about what is going on."
             
+            logger.info(f"[{call_id}] Attempting to generate combined summary using LLM.")
+            summary_file_path = generate_llm_summary(
+                transcript_json_path=merged_transcript_output_path,
+                system_prompt=system_prompt,
+                llm_config=llm_call_config,
+                output_dir=call_output_dir, # The llm_module function should use this
+                output_filename=COMBINED_SUMMARY_FILENAME
+            )
+
+            if summary_file_path and summary_file_path.exists():
+                logger.info(f"[{call_id}] Combined summary generated successfully at \'{summary_file_path}\'.")
+            else:
+                logger.warning(f"[{call_id}] Combined summary generation failed or was skipped by the LLM module.")
+        else:
+            logger.warning(f"[{call_id}] Skipping combined summary generation as 'llm_studio_model_identifier' not found in config.")
+    elif job_details['type'] == 'pair': # Only if it was a pair type that could have a merged transcript
+         logger.warning(f"[{call_id}] Skipping combined summary generation as merged transcript was not available.")
+
+    # TODO: 
+    # 1. Files retrieved, mixed, merged. Combined summary attempted.
+    # 2. Next: Finalize output structure/saving (mostly done by individual steps). Review overall process.
+    
     logger.info(f"Finished processing placeholder for call. Retrieved files copied to output for verification.")
 
 
