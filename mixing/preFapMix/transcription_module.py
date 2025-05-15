@@ -5,7 +5,8 @@ from pathlib import Path
 import json
 import torch
 from whisper import load_model as whisper_load_model # Renamed to avoid conflict
-from pyannote.core import Annotation
+from pyannote.core import Annotation, Segment
+from pyannote.database.util import load_rttm # Correct import for RTTM loading
 from pydub import AudioSegment # For slicing
 import tempfile
 import shutil # For cleaning up temp slice dir
@@ -16,22 +17,14 @@ logger = logging.getLogger(__name__)
 
 def _format_timestamp(seconds: float) -> str:
     """Converts seconds to HH:MM:SS.mmm format."""
-    # ... (implementation as previously defined or standard library if available) ...
-    # For now, a basic version:
-    # This is a simplified version from whisper.utils.format_timestamp
-    # Consider using whisper.utils.format_timestamp directly if robust formatting is needed
     assert seconds >= 0, "non-negative timestamp expected"
     milliseconds = round(seconds * 1000.0)
-
     hours = milliseconds // 3_600_000
     milliseconds %= 3_600_000
-
     minutes = milliseconds // 60_000
     milliseconds %= 60_000
-
     seconds_val = milliseconds // 1000
     milliseconds %= 1000
-
     return f"{hours:02d}:{minutes:02d}:{seconds_val:02d}.{milliseconds:03d}"
 
 # Adapted from WhisperBite.utils - simplified for speaker labels like SPEAKER_00, S0 etc.
@@ -41,7 +34,11 @@ def format_speaker_label_for_output(label_from_pyannote: str) -> str:
         match = re.match(r"SPEAKER_(\d+)", label_from_pyannote)
         if match:
             return f"S{match.group(1)}"
-    return label_from_pyannote # Fallback
+    # Allow already formatted labels like S0, S1 to pass through
+    if isinstance(label_from_pyannote, str) and re.match(r"S\d+", label_from_pyannote):
+        return label_from_pyannote
+    logger.warning(f"Could not format speaker label '{label_from_pyannote}', using original or converting to string.")
+    return str(label_from_pyannote)
 
 
 def _sanitize_filename(text: str, max_length: int = 40) -> str:
@@ -52,345 +49,393 @@ def _sanitize_filename(text: str, max_length: int = 40) -> str:
     """
     if not text:
         return "untitled"
-    # Remove or replace characters not suitable for filenames
-    # Keep alphanumeric, underscore, hyphen. Replace others.
     sanitized = re.sub(r'[^a-zA-Z0-9_\\-]+', '_', text)
-    # Replace multiple underscores/hyphens with a single one
-    sanitized = re.sub(r'[_\\-]+', '_', sanitized)
-    # Lowercase
+    sanitized = re.sub(r'[_\\-]+', '_', sanitized).strip('_')
     sanitized = sanitized.lower()
-    # Truncate
-    return sanitized[:max_length].strip('_')
+    return sanitized[:max_length].strip('_') or "segment" # Ensure not empty after stripping
 
 
-# Adapted from WhisperBite.whisperBite.slice_audio_by_speaker
-def slice_audio_for_transcription(
-    audio_file_path: str, 
-    diarization_annotation: Annotation, 
-    temp_slices_dir: Path,
-    pii_safe_file_prefix: str, # For logging context
-    min_segment_duration_ms: int = 500 # Min duration in ms to avoid tiny slices
+# --- NEW Core Slicing Logic (inspired by WhisperBite) ---
+def _perform_slicing_with_merging_and_fades(
+    audio_file_path: str,
+    diarization_annotation: Annotation,
+    temp_output_dir_for_slices: Path,
+    pii_safe_file_prefix: str, # For logging
+    min_segment_duration_s: float = 0.5, # Min duration in seconds
+    merge_gap_s: float = 0.4, # Max gap in seconds to merge segments of the same speaker
+    fade_duration_ms: int = 50   # Fade in/out duration in ms
 ):
     """
-    Slices an audio file based on pyannote diarization annotation.
-    Saves slices to temp_slices_dir.
-    Returns a list of dictionaries, each representing a slice with its path, speaker, start, end, and a new sequence_id.
+    Slices audio based on diarization, merges close segments of the same speaker, applies fades,
+    and saves temporary slices.
+    Returns a dictionary: {formatted_speaker: [{'temp_slice_path': ..., 'start_time_orig': ..., 'end_time_orig': ..., 'sequence_id': ...}, ...]}
     """
-    logger.info(f"[{pii_safe_file_prefix}] Slicing audio '{audio_file_path}' based on diarization. Min segment: {min_segment_duration_ms}ms.")
+    logger.info(f"[{pii_safe_file_prefix}] Starting audio slicing with merging and fades for: {audio_file_path}")
+    logger.info(f"[{pii_safe_file_prefix}] Config: min_segment_duration_s={min_segment_duration_s}, merge_gap_s={merge_gap_s}, fade_duration_ms={fade_duration_ms}")
+
     try:
         audio = AudioSegment.from_file(audio_file_path)
         logger.debug(f"[{pii_safe_file_prefix}] Loaded audio for slicing: {audio_file_path}. Duration: {len(audio)}ms.")
+    except FileNotFoundError:
+        logger.error(f"[{pii_safe_file_prefix}] Audio file NOT FOUND for slicing: '{audio_file_path}'")
+        return {}
     except Exception as e:
-        logger.error(f"[{pii_safe_file_prefix}] Error loading audio file '{audio_file_path}' for slicing: {e}")
-        return []
+        logger.error(f"[{pii_safe_file_prefix}] Error loading audio file '{audio_file_path}' for slicing: {e}", exc_info=True)
+        return {}
 
-    speaker_audio_segments = []
-    processed_segments_count = 0
-    sequence_id_counter = 0 # Initialize sequence ID counter
-
-    for segment, track, label in diarization_annotation.itertracks(yield_label=True):
-        start_ms = segment.start * 1000
-        end_ms = segment.end * 1000
-        duration_ms = end_ms - start_ms
-
-        if duration_ms < min_segment_duration_ms:
-            logger.debug(f"[{pii_safe_file_prefix}] Skipping short segment for speaker {label} ({duration_ms}ms): {segment.start:.2f}s - {segment.end:.2f}s")
+    # 1. Group initial segments by speaker from diarization_annotation
+    raw_speaker_segments = {}
+    raw_segment_count = 0
+    for segment, _, label in diarization_annotation.itertracks(yield_label=True):
+        raw_segment_count += 1
+        duration_s = segment.end - segment.start
+        if duration_s < min_segment_duration_s:
+            logger.debug(f"[{pii_safe_file_prefix}] Skipping raw short segment for speaker {label} ({duration_s:.2f}s): {segment.start:.2f}s - {segment.end:.2f}s")
             continue
-
-        speaker_label_formatted = format_speaker_label_for_output(label)
-        speaker_slice_dir = temp_slices_dir / speaker_label_formatted
-        speaker_slice_dir.mkdir(parents=True, exist_ok=True)
-
-        # Use a temporary, simple name for the slice file. It will be renamed later.
-        # Include sequence_id here for uniqueness if many small segments from one speaker.
-        slice_filename = f"{pii_safe_file_prefix}_{speaker_label_formatted}_seg_{processed_segments_count:04d}_temp.wav"
-        slice_path = speaker_slice_dir / slice_filename
         
-        try:
-            segment_audio = audio[start_ms:end_ms]
-            segment_audio.export(slice_path, format="wav")
+        formatted_speaker = format_speaker_label_for_output(label)
+        if formatted_speaker not in raw_speaker_segments:
+            raw_speaker_segments[formatted_speaker] = []
+        raw_speaker_segments[formatted_speaker].append({'start': segment.start, 'end': segment.end, 'duration': duration_s})
+    
+    logger.info(f"[{pii_safe_file_prefix}] Initial processing: {raw_segment_count} raw segments from RTTM. After min_duration filter, collected segments for {len(raw_speaker_segments)} speakers.")
+
+    # 2. Merge close segments for each speaker
+    merged_speaker_segments = {}
+    for speaker, segments in raw_speaker_segments.items():
+        if not segments:
+            continue
+        segments.sort(key=lambda x: x['start']) # Sort by start time
+
+        merged = []
+        current_segment = segments[0]
+        for next_segment in segments[1:]:
+            gap = next_segment['start'] - current_segment['end']
+            if gap < merge_gap_s: # If gap is small, merge
+                current_segment['end'] = next_segment['end']
+                current_segment['duration'] = current_segment['end'] - current_segment['start']
+            else: # Gap is too large, start a new merged segment
+                merged.append(current_segment)
+                current_segment = next_segment
+        merged.append(current_segment) # Add the last segment
+        merged_speaker_segments[speaker] = merged
+        logger.debug(f"[{pii_safe_file_prefix}] Speaker {speaker}: Merged {len(segments)} raw segments into {len(merged)} segments.")
+
+    # 3. Export merged segments with fades to temporary files and collect info
+    output_segment_info = {} # This will be like WhisperBite's segment_info
+    global_sequence_counter = 0
+
+    for speaker_label, segments in merged_speaker_segments.items():
+        if not segments: continue
+
+        speaker_temp_slice_dir = temp_output_dir_for_slices / speaker_label
+        speaker_temp_slice_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_segment_info[speaker_label] = []
+
+        for i, seg_times in enumerate(segments):
+            start_ms = seg_times['start'] * 1000
+            end_ms = seg_times['end'] * 1000
             
-            speaker_audio_segments.append({
-                'temp_slice_path': str(slice_path), 
-                'speaker': speaker_label_formatted,
-                'start_time_orig': segment.start, # Original start time in seconds from diarization
-                'end_time_orig': segment.end,     # Original end time in seconds from diarization
-                'sequence_id': sequence_id_counter # Add sequence ID
-            })
-            sequence_id_counter += 1 # Increment for next segment
-            processed_segments_count += 1
-            logger.debug(f"[{pii_safe_file_prefix}] Exported slice: {slice_path} for speaker {speaker_label_formatted} ({segment.start:.2f}s - {segment.end:.2f}s)")
-        except Exception as e:
-            logger.error(f"[{pii_safe_file_prefix}] Error exporting audio segment for speaker {speaker_label_formatted} ({segment.start:.2f}s - {segment.end:.2f}s): {e}")
-            # Continue to next segment if one slice fails
+            # Ensure duration is still above a threshold after potential merging (e.g. if min_segment_duration_s was very small)
+            if (end_ms - start_ms) / 1000 < (min_segment_duration_s / 2): # Use a fraction of original min as sanity check
+                 logger.debug(f"[{pii_safe_file_prefix}] Skipping very short segment for speaker {speaker_label} after merging ({(end_ms - start_ms)/1000:.2f}s).")
+                 continue
 
-    logger.info(f"[{pii_safe_file_prefix}] Slicing complete. Generated {len(speaker_audio_segments)} temporary audio slices in '{temp_slices_dir}'.")
-    return speaker_audio_segments
+            try:
+                segment_audio = audio[start_ms:end_ms]
+                
+                # Apply fade in/out
+                actual_fade_duration = min(fade_duration_ms, int(segment_audio.duration_seconds * 1000 / 4)) # Ensure fade is not too long
+                if actual_fade_duration > 0: # Only apply if positive
+                    segment_audio = segment_audio.fade_in(actual_fade_duration).fade_out(actual_fade_duration)
+
+                # Temporary slice filename - simple, will be renamed later based on content
+                temp_slice_filename = f"temp_slice_{speaker_label}_{global_sequence_counter:04d}.wav"
+                temp_slice_path = speaker_temp_slice_dir / temp_slice_filename
+                segment_audio.export(temp_slice_path, format="wav")
+
+                output_segment_info[speaker_label].append({
+                    'temp_slice_path': str(temp_slice_path),
+                    'start_time_orig': seg_times['start'], # Original start time in seconds
+                    'end_time_orig': seg_times['end'],     # Original end time in seconds
+                    'sequence_id': global_sequence_counter
+                })
+                global_sequence_counter += 1
+                logger.debug(f"[{pii_safe_file_prefix}] Exported temp slice: {temp_slice_path} for speaker {speaker_label} ({seg_times['start']:.2f}s - {seg_times['end']:.2f}s)")
+            except Exception as e:
+                logger.error(f"[{pii_safe_file_prefix}] Error exporting audio segment for speaker {speaker_label} ({seg_times['start']:.2f}s - {seg_times['end']:.2f}s): {e}", exc_info=True)
+
+    total_temp_slices = sum(len(s) for s in output_segment_info.values())
+    logger.info(f"[{pii_safe_file_prefix}] Slicing with merging and fades complete. Generated {total_temp_slices} temporary audio slices in '{temp_output_dir_for_slices}'.")
+    return output_segment_info
 
 
-def transcribe_sliced_segments(
-    whisper_model, 
-    sliced_audio_segments: list, 
-    language_for_transcription: str | None, # Can be None for auto-detect
-    pii_safe_file_prefix: str,
-    persistent_output_dir: Path # Main output dir for the transcription stage
+# --- NEW Core Transcription Logic (inspired by WhisperBite) ---
+def _transcribe_and_create_soundbites(
+    whisper_model,
+    segment_info_from_slicing: dict, # Output from _perform_slicing_...
+    language_for_transcription: str | None,
+    persistent_soundbite_output_dir: Path, # Main stage output dir (e.g., .../03_transcription/)
+    pii_safe_file_prefix: str, # For logging
+    min_words_for_filename: int = 5
 ):
     """
-    Transcribes a list of audio slices using the provided Whisper model.
-    Saves individual .wav and .txt soundbites to persistent_output_dir / speaker_label /.
-    Updates segment dictionaries with paths to these soundbites.
-    Returns a list of transcribed segments (dictionaries).
+    Transcribes temporary audio slices, saves persistent .wav and .txt soundbites
+    with PII-safe, content-derived names.
+    Returns a list of transcribed segment data dictionaries for the main JSON.
     """
-    all_transcribed_segments = []
-    logger.info(f"[{pii_safe_file_prefix}] Starting transcription of {len(sliced_audio_segments)} audio slices.")
+    all_final_transcribed_segments = []
+    total_slices_to_transcribe = sum(len(s) for s in segment_info_from_slicing.values())
+    logger.info(f"[{pii_safe_file_prefix}] Starting transcription of {total_slices_to_transcribe} audio slices and creating soundbites.")
 
-    for segment_info in sliced_audio_segments:
-        temp_slice_path_str = segment_info['temp_slice_path']
-        temp_slice_path = Path(temp_slice_path_str)
-        speaker_label = segment_info['speaker']
-        sequence_id = segment_info['sequence_id']
-        start_time_orig = segment_info['start_time_orig']
-        end_time_orig = segment_info['end_time_orig']
+    if not segment_info_from_slicing:
+        logger.warning(f"[{pii_safe_file_prefix}] No segment info provided from slicing. Skipping transcription.")
+        return []
 
-        if not temp_slice_path.exists():
-            logger.warning(f"[{pii_safe_file_prefix}] Audio slice file not found, skipping: {temp_slice_path_str}")
-            continue
+    for speaker_label, segments_to_transcribe in segment_info_from_slicing.items():
+        if not segments_to_transcribe: continue
 
-        try:
-            logger.debug(f"[{pii_safe_file_prefix}] Transcribing slice: {temp_slice_path_str} for speaker {speaker_label}")
-            # The result object contains the recognized text, segments, and language information.
-            # For a single slice, we typically expect one dominant segment in 'result['segments']'
-            # or just the full text in 'result['text']'.
-            # We pass language=None to let Whisper auto-detect if not specified.
-            result = whisper_model.transcribe(temp_slice_path_str, language=language_for_transcription, verbose=False) # verbose=False or True for more Whisper output
-            transcribed_text = result['text'].strip()
-            
-            logger.debug(f"[{pii_safe_file_prefix}] Slice {temp_slice_path_str} transcribed. Text: '{transcribed_text[:50]}...'")
+        # Ensure speaker directory exists in the persistent output
+        speaker_final_output_dir = persistent_soundbite_output_dir / speaker_label
+        speaker_final_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # --- Soundbite Saving Logic ---
-            speaker_output_dir = persistent_output_dir / speaker_label
-            speaker_output_dir.mkdir(parents=True, exist_ok=True)
+        for segment_data in segments_to_transcribe:
+            temp_slice_path_str = segment_data['temp_slice_path']
+            temp_slice_path = Path(temp_slice_path_str)
+            sequence_id = segment_data['sequence_id']
+            start_time_orig = segment_data['start_time_orig']
+            end_time_orig = segment_data['end_time_orig']
 
-            # Create filename from first few words
-            first_words = "_".join(transcribed_text.split()[:5]) # Take first 5 words
-            sanitized_first_words = _sanitize_filename(first_words)
-            if not sanitized_first_words or sanitized_first_words == "_": # Handle empty or only underscore
-                sanitized_first_words = "segment"
+            if not temp_slice_path.exists():
+                logger.warning(f"[{pii_safe_file_prefix}] Temporary audio slice file not found, skipping: {temp_slice_path_str}")
+                continue
 
-            soundbite_base_name = f"{sequence_id:04d}_{sanitized_first_words}"
-            
-            soundbite_audio_path = speaker_output_dir / f"{soundbite_base_name}.wav"
-            soundbite_text_path = speaker_output_dir / f"{soundbite_base_name}.txt"
+            try:
+                logger.debug(f"[{pii_safe_file_prefix}] Transcribing temp slice: {temp_slice_path_str} for speaker {speaker_label}")
+                result = whisper_model.transcribe(str(temp_slice_path), language=language_for_transcription, verbose=False)
+                unstripped_text = result['text']
+                transcribed_text = unstripped_text.strip()
+                
+                logger.debug(f"[{pii_safe_file_prefix}] Slice {temp_slice_path_str} transcribed. Raw text: '{unstripped_text[:70]}...'. Stripped text: '{transcribed_text[:70]}...'")
 
-            # Copy the temporary audio slice to its new persistent soundbite path
-            shutil.copy2(temp_slice_path, soundbite_audio_path)
-            logger.debug(f"[{pii_safe_file_prefix}] Saved soundbite audio: {soundbite_audio_path}")
+                if not transcribed_text: # If transcription is empty, skip soundbite creation for this slice
+                    logger.warning(f"[{pii_safe_file_prefix}] Empty transcription for slice {temp_slice_path_str} (speaker {speaker_label}). Skipping soundbite creation.")
+                    continue
 
-            # Create the corresponding text file with timestamp and transcription
-            timestamp_str = f"[{_format_timestamp(start_time_orig)} --> {_format_timestamp(end_time_orig)}]"
-            with open(soundbite_text_path, 'w', encoding='utf-8') as f_text:
-                f_text.write(f"{timestamp_str}\\n")
-                f_text.write(transcribed_text + "\\n")
-            logger.debug(f"[{pii_safe_file_prefix}] Saved soundbite text: {soundbite_text_path}")
-            
-            # Prepare segment data for the main JSON output
-            # Note: Whisper's result['segments'] for a short slice might be simple.
-            # We are creating a single segment entry based on the overall transcription of the slice.
-            # If Whisper provided detailed segments for the slice, one might iterate through result['segments']
-            # and adjust start/end times relative to the slice's own start, then add to original start_time_orig.
-            # For simplicity here, we treat the whole slice transcription as one segment.
-            segment_output_data = {
-                "speaker": speaker_label,
-                "start_time": start_time_orig, # Original start time from diarization
-                "end_time": end_time_orig,     # Original end time from diarization
-                "text": transcribed_text,
-                "soundbite_audio_path": str(soundbite_audio_path.resolve()),
-                "soundbite_text_path": str(soundbite_text_path.resolve())
-                # Include other Whisper segment details if needed (e.g., tokens, confidence) by parsing `result` more deeply.
-            }
-            all_transcribed_segments.append(segment_output_data)
+                # --- Soundbite Saving Logic ---
+                first_words = "_".join(transcribed_text.split()[:min_words_for_filename])
+                sanitized_first_words = _sanitize_filename(first_words) # _sanitize_filename ensures it's not empty
 
-        except Exception as e:
-            logger.error(f"[{pii_safe_file_prefix}] Error transcribing audio slice {temp_slice_path_str}: {e}", exc_info=True)
-            # Optionally, add a placeholder or skip this segment in the final output.
-            # For now, we just log and continue.
+                soundbite_base_name = f"{sequence_id:04d}_{sanitized_first_words}"
+                final_soundbite_audio_path = speaker_final_output_dir / f"{soundbite_base_name}.wav"
+                final_soundbite_text_path = speaker_final_output_dir / f"{soundbite_base_name}.txt"
 
-    logger.info(f"[{pii_safe_file_prefix}] Transcription of slices complete. Processed {len(all_transcribed_segments)} segments with soundbites.")
-    return all_transcribed_segments
+                # Copy the temporary audio slice to its new persistent soundbite path
+                shutil.copy2(temp_slice_path, final_soundbite_audio_path)
+                logger.debug(f"[{pii_safe_file_prefix}] Saved final soundbite audio: {final_soundbite_audio_path}")
+
+                # Create the corresponding text file
+                timestamp_str = f"[{_format_timestamp(start_time_orig)} --> {_format_timestamp(end_time_orig)}]"
+                with open(final_soundbite_text_path, 'w', encoding='utf-8') as f_text:
+                    f_text.write(f"{timestamp_str}\\n")
+                    f_text.write(transcribed_text + "\\n")
+                logger.debug(f"[{pii_safe_file_prefix}] Saved final soundbite text: {final_soundbite_text_path}")
+                
+                all_final_transcribed_segments.append({
+                    "speaker": speaker_label,
+                    "start_time": start_time_orig,
+                    "end_time": end_time_orig,
+                    "text": transcribed_text,
+                    "soundbite_audio_path": str(final_soundbite_audio_path.resolve()),
+                    "soundbite_text_path": str(final_soundbite_text_path.resolve()),
+                    "sequence_id": sequence_id # Retain for potential sorting/reference
+                })
+
+            except Exception as e:
+                logger.error(f"[{pii_safe_file_prefix}] Error transcribing/saving soundbite for temp slice {temp_slice_path_str}: {e}", exc_info=True)
+    
+    # Sort final segments by original start time before returning
+    all_final_transcribed_segments.sort(key=lambda x: x['start_time'])
+    logger.info(f"[{pii_safe_file_prefix}] Transcription and soundbite creation complete. Processed {len(all_final_transcribed_segments)} final segments.")
+    return all_final_transcribed_segments
 
 
-# --- Main Module Function ---
+# --- Main Module Function (Orchestrator) ---
 def run_transcription(
     vocal_stem_path: str, 
     diarization_file_path: str, 
-    output_dir_str: str, 
-    pii_safe_file_prefix: str, # Added for PII-safe output naming
+    output_dir_str: str, # This is the persistent output directory for the transcription stage
+    pii_safe_file_prefix: str,
     config: dict = None
 ):
     """
     Performs transcription using Whisper, guided by Pyannote diarization.
     Outputs a JSON file containing the full transcript with speaker labels and timestamps.
     Also outputs individual .wav and .txt soundbites per speaker segment into speaker-specific subdirs.
+    This version incorporates segment merging and audio fades inspired by WhisperBite.
     """
     if config is None: config = {}
     
-    logger.info(f"[{pii_safe_file_prefix}] Starting transcription process for vocal stem: '{vocal_stem_path}' using diarization: '{diarization_file_path}'")
-    output_dir = Path(output_dir_str)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[{pii_safe_file_prefix}] Starting transcription (WhisperBite-style) for: '{vocal_stem_path}', RTTM: '{diarization_file_path}'")
+    persistent_stage_output_dir = Path(output_dir_str)
+    persistent_stage_output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Configuration ---
-    whisper_model_name = config.get("whisper_model_name", "base.en") # e.g., "base.en", "small", "medium"
-    language_for_transcription = config.get("language_for_transcription", None) # None for auto-detect, or "en", "es", etc.
-    min_segment_duration_ms_slicing = config.get("min_segment_duration_ms_slicing", 500)
+    whisper_model_name = config.get("whisper_model_name", "base.en")
+    language = config.get("language_for_transcription", None)
+    min_segment_duration_s = config.get("min_segment_duration_s", 0.5) # from previous default of 500ms
+    merge_gap_s = config.get("merge_gap_s", 0.4)
+    fade_duration_ms = config.get("fade_duration_ms", 50)
+    min_words_for_filename = config.get("min_words_for_filename", 5)
+
 
     # --- Validate Inputs ---
     if not vocal_stem_path or not Path(vocal_stem_path).exists():
-        logger.error(f"[{pii_safe_file_prefix}] Vocal stem file not found or path is None: {vocal_stem_path}")
-        return {"error": "Vocal stem file not found", "transcript_json_path": None, "soundbite_dirs_info": None}
+        logger.error(f"[{pii_safe_file_prefix}] Vocal stem file not found: {vocal_stem_path}")
+        return {"error": "Vocal stem file not found", "transcript_json_path": None, "soundbite_speaker_dirs": []}
     if not diarization_file_path or not Path(diarization_file_path).exists():
-        logger.error(f"[{pii_safe_file_prefix}] Diarization RTTM file not found or path is None: {diarization_file_path}")
-        return {"error": "Diarization RTTM file not found", "transcript_json_path": None, "soundbite_dirs_info": None}
+        logger.error(f"[{pii_safe_file_prefix}] Diarization RTTM file not found: {diarization_file_path}")
+        return {"error": "Diarization RTTM file not found", "transcript_json_path": None, "soundbite_speaker_dirs": []}
 
     # --- Load Whisper Model ---
     try:
         logger.info(f"[{pii_safe_file_prefix}] Loading Whisper model: {whisper_model_name}")
-        # Check if CUDA is available and use it if so, for faster transcription
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"[{pii_safe_file_prefix}] Whisper will use device: {device}")
+        logger.info(f"[{pii_safe_file_prefix}] Whisper using device: {device}")
         whisper_model = whisper_load_model(whisper_model_name, device=device)
-        logger.info(f"[{pii_safe_file_prefix}] Whisper model '{whisper_model_name}' loaded successfully on {device}.")
     except Exception as e:
         logger.error(f"[{pii_safe_file_prefix}] Failed to load Whisper model '{whisper_model_name}': {e}", exc_info=True)
-        return {"error": f"Failed to load Whisper model: {e}", "transcript_json_path": None, "soundbite_dirs_info": None}
+        return {"error": f"Failed to load Whisper model: {e}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
 
-    # --- Load Diarization ---
+    # --- Load Diarization (RTTM) ---
+    logger.info(f"[{pii_safe_file_prefix}] Loading RTTM: {diarization_file_path}")
     try:
-        logger.debug(f"[{pii_safe_file_prefix}] Loading diarization from RTTM: {diarization_file_path}")
-        # diarization_annotation = RTTMParser().read(diarization_file_path) # OLD way causing import error
-        diarization_annotation = Annotation.read_rttm(diarization_file_path) # CORRECTED way
-        logger.info(f"[{pii_safe_file_prefix}] Successfully loaded diarization data from {diarization_file_path}. Found {len(diarization_annotation.get_timeline().support())} speech segments for {len(diarization_annotation.labels())} speakers.")
+        rttm_data = load_rttm(diarization_file_path)
+        if not rttm_data:
+            logger.error(f"[{pii_safe_file_prefix}] RTTM file loaded empty: {diarization_file_path}")
+            return {"error": "RTTM file loaded empty", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        first_key = list(rttm_data.keys())[0]
+        diarization_annotation = rttm_data[first_key]
+        if not isinstance(diarization_annotation, Annotation):
+            logger.error(f"[{pii_safe_file_prefix}] Invalid data type from RTTM (key: {first_key}): {type(diarization_annotation)}")
+            return {"error": "Invalid data from RTTM", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        logger.info(f"[{pii_safe_file_prefix}] RTTM loaded successfully (key: {first_key}).")
     except Exception as e:
-        logger.error(f"[{pii_safe_file_prefix}] Error loading or parsing RTTM diarization file '{diarization_file_path}': {e}", exc_info=True)
-        return {"error": f"Error loading RTTM: {e}", "transcript_json_path": None, "soundbite_dirs_info": None}
+        logger.error(f"[{pii_safe_file_prefix}] Error loading RTTM '{diarization_file_path}': {e}", exc_info=True)
+        return {"error": f"Error loading RTTM: {e}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
 
-    # --- Slicing and Transcription ---
-    # Create a temporary directory for audio slices
-    with tempfile.TemporaryDirectory(prefix=f"{pii_safe_file_prefix}_slices_") as temp_slices_dir_str:
-        temp_slices_dir = Path(temp_slices_dir_str)
-        logger.info(f"[{pii_safe_file_prefix}] Created temporary directory for audio slices: {temp_slices_dir}")
-
-        # 1. Slice audio based on diarization
-        sliced_segments_info = slice_audio_for_transcription(
-            vocal_stem_path, 
-            diarization_annotation, 
-            temp_slices_dir,
-            pii_safe_file_prefix,
-            min_segment_duration_ms=min_segment_duration_ms_slicing
-        )
-
-        if not sliced_segments_info:
-            logger.warning(f"[{pii_safe_file_prefix}] No audio slices were generated. Transcription cannot proceed.")
-            # Cleanup of temp_slices_dir happens automatically due to 'with' statement
-            return {"error": "No audio slices generated from diarization.", "transcript_json_path": None, "soundbite_dirs_info": None}
-
-        # 2. Transcribe sliced segments and save soundbites
-        # The 'output_dir' passed here is the main output directory for this transcription stage,
-        # where speaker subdirectories and soundbites will be saved.
-        transcribed_segments_data = transcribe_sliced_segments(
-            whisper_model, 
-            sliced_segments_info, 
-            language_for_transcription,
-            pii_safe_file_prefix,
-            persistent_output_dir=output_dir # Main stage output dir
-        )
+    # --- Main Processing using a temporary directory for intermediate files ---
+    final_transcribed_segments = []
+    # Use a single encompassing temp dir for all slices created by this run_transcription call
+    with tempfile.TemporaryDirectory(prefix=f"{pii_safe_file_prefix}_transcription_work_") as main_temp_dir_str:
+        main_temp_dir = Path(main_temp_dir_str)
+        logger.info(f"[{pii_safe_file_prefix}] Created main temporary working directory: {main_temp_dir}")
         
-        # transcribed_segments_data now contains paths to persistent soundbites
+        # This sub-directory will hold the first pass of slices (merged, faded, but not yet transcribed/renamed)
+        temp_slices_subdir = main_temp_dir / "initial_audio_slices"
+        temp_slices_subdir.mkdir(parents=True, exist_ok=True)
 
-    # --- Final Output ---
-    # Main JSON transcript file (using pii_safe_file_prefix for consistency)
-    output_transcript_json_path = output_dir / f"{pii_safe_file_prefix}_transcription.json"
-    
+        # 1. Perform slicing with merging and fades (saves to temp_slices_subdir)
+        segment_info_for_transcription = _perform_slicing_with_merging_and_fades(
+            audio_file_path=vocal_stem_path,
+            diarization_annotation=diarization_annotation,
+            temp_output_dir_for_slices=temp_slices_subdir,
+            pii_safe_file_prefix=pii_safe_file_prefix,
+            min_segment_duration_s=min_segment_duration_s,
+            merge_gap_s=merge_gap_s,
+            fade_duration_ms=fade_duration_ms
+        )
+
+        if not segment_info_for_transcription or not any(segment_info_for_transcription.values()):
+            logger.warning(f"[{pii_safe_file_prefix}] No processable audio slices were generated after slicing/merging. Transcription will be empty.")
+            # Proceed to create an empty JSON, but the list will be empty.
+        else:
+            # 2. Transcribe slices and create final soundbites (saves to persistent_stage_output_dir)
+            final_transcribed_segments = _transcribe_and_create_soundbites(
+                whisper_model=whisper_model,
+                segment_info_from_slicing=segment_info_for_transcription,
+                language_for_transcription=language,
+                persistent_soundbite_output_dir=persistent_stage_output_dir, # Final destination for S0/, S1/ etc.
+                pii_safe_file_prefix=pii_safe_file_prefix,
+                min_words_for_filename=min_words_for_filename
+            )
+        
+        # main_temp_dir (and temp_slices_subdir within it) will be cleaned up automatically when 'with' block exits.
+        logger.info(f"[{pii_safe_file_prefix}] Temporary working directory {main_temp_dir} will be cleaned up.")
+
+
+    # --- Final Output JSON ---
+    output_transcript_json_path = persistent_stage_output_dir / f"{pii_safe_file_prefix}_transcription.json"
     try:
         with open(output_transcript_json_path, 'w', encoding='utf-8') as f:
-            # The structure here should match what downstream processes expect.
-            # This typically is a list of segments.
-            json.dump(transcribed_segments_data, f, indent=2, ensure_ascii=False)
-        logger.info(f"[{pii_safe_file_prefix}] Full transcript with soundbite paths saved to: {output_transcript_json_path}")
+            json.dump(final_transcribed_segments, f, indent=2, ensure_ascii=False) # Save the list of dicts
+        logger.info(f"[{pii_safe_file_prefix}] Main transcript JSON saved to: {output_transcript_json_path}")
         
-        # Collect information about soundbite directories for the return value
-        soundbite_dirs = list(set([str(Path(seg['soundbite_audio_path']).parent) for seg in transcribed_segments_data if 'soundbite_audio_path' in seg]))
+        soundbite_dirs = []
+        if final_transcribed_segments: # Only try to get parent dirs if segments exist
+            soundbite_dirs = sorted(list(set([
+                str(Path(seg['soundbite_audio_path']).parent) 
+                for seg in final_transcribed_segments if 'soundbite_audio_path' in seg
+            ])))
         
         return {
             "transcript_json_path": str(output_transcript_json_path.resolve()),
-            "soundbite_speaker_dirs": soundbite_dirs, # List of speaker directories containing .wav/.txt
-            "message": f"Transcription complete. {len(transcribed_segments_data)} segments processed."
+            "soundbite_speaker_dirs": soundbite_dirs,
+            "message": f"Transcription complete. {len(final_transcribed_segments)} segments processed into soundbites."
         }
-
-    except IOError as e_io:
-        logger.error(f"[{pii_safe_file_prefix}] Failed to write transcript JSON file '{output_transcript_json_path}': {e_io}", exc_info=True)
-        return {"error": f"Failed to write transcript JSON: {e_io}", "transcript_json_path": None, "soundbite_dirs_info": None}
     except Exception as e_final:
-        logger.error(f"[{pii_safe_file_prefix}] An unexpected error occurred during final output generation: {e_final}", exc_info=True)
-        return {"error": f"Unexpected error in final output: {e_final}", "transcript_json_path": None, "soundbite_dirs_info": None}
+        logger.error(f"[{pii_safe_file_prefix}] Error during final JSON output generation: {e_final}", exc_info=True)
+        return {"error": f"Error in final output: {e_final}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
 
 
-# --- Main block for testing ---
+# --- Main block for testing (remains similar but now tests the refactored logic) ---
 if __name__ == '__main__':
-    # This is a basic test setup.
-    # You'll need:
-    # 1. A sample vocal stem WAV file.
-    # 2. A corresponding RTTM diarization file for that vocal stem.
-    # 3. Adjust paths below accordingly.
-    # 4. Ensure Whisper and Pyannote models can be downloaded or are cached.
-    # 5. Set HF_TOKEN environment variable if your Pyannote models require it.
-    
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] - %(name)s.%(funcName)s - %(message)s')
-    logger.info("Starting transcription_module.py test run...")
+    logger.info("Starting transcription_module.py test run (refactored WhisperBite style)...")
 
-    # --- Test Configuration ---
-    # Create dummy vocal stem and RTTM for testing if they don't exist
-    # For a real test, replace these with actual file paths.
-    test_output_base_dir = Path("workspace/transcription_module_test_outputs")
+    test_output_base_dir = Path("workspace/transcription_module_test_outputs_wb_style")
     test_output_base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Dummy PII-safe prefix for testing
-    test_pii_prefix = "call_20240101-120000_test"
+    test_pii_prefix = "call_20240102-140000_test_wb"
 
-    # Paths to your test files
-    # IMPORTANT: Create these files or point to existing ones for the test to run.
-    # For example, a short vocal recording and a simple RTTM file.
-    
-    # Example: Create a dummy 1-second silent WAV file for vocal_stem_path
     dummy_vocal_stem_path = test_output_base_dir / f"{test_pii_prefix}_vocals_normalized.wav"
     if not dummy_vocal_stem_path.exists():
         try:
-            from pydub import AudioSegment
-            silence = AudioSegment.silent(duration=1000, frame_rate=16000) # 1 sec, 16kHz
+            silence = AudioSegment.silent(duration=5000, frame_rate=16000) # 5 secs
+            # Add a couple of beeps to make it non-empty for transcription
+            beep1 = AudioSegment.sine(440).to_mono()[:200] # 200ms beep
+            beep2 = AudioSegment.sine(880).to_mono()[:200]
+            silence = silence.overlay(beep1, position=1000)
+            silence = silence.overlay(beep2, position=3000)
             silence.export(dummy_vocal_stem_path, format="wav")
-            logger.info(f"Created dummy vocal stem: {dummy_vocal_stem_path}")
+            logger.info(f"Created dummy vocal stem with beeps: {dummy_vocal_stem_path}")
         except Exception as e:
-            logger.error(f"Could not create dummy vocal stem: {e}. Please create it manually or provide a real one.")
-            exit()
+            logger.error(f"Could not create dummy vocal stem: {e}. Test may fail.", exc_info=True)
             
-    # Example: Create a dummy RTTM file for diarization_file_path
-    # This RTTM defines one speaker (S0) speaking for the first second.
     dummy_rttm_path = test_output_base_dir / f"{test_pii_prefix}_vocals_normalized_diarization.rttm"
     if not dummy_rttm_path.exists():
-        rttm_content = f"SPEAKER {Path(dummy_vocal_stem_path).stem} 1 0.000 1.000 <NA> <NA> SPEAKER_00 <NA> <NA>\\n"
-        # The file ID in RTTM (second field) should ideally match the stem of the audio file it refers to.
-        # Here, Path(dummy_vocal_stem_path).stem would be 'call_20240101-120000_test_vocals_normalized'
+        # RTTM for the 5-second audio with two speakers and some silences
+        # File ID in RTTM (second field) should match the stem of the audio file it refers to.
+        rttm_file_id_stem = Path(dummy_vocal_stem_path).stem 
+        rttm_content = (
+            f"SPEAKER {rttm_file_id_stem} 1 0.800 0.600 <NA> <NA> SPEAKER_00 <NA> <NA>\\n"  # Corresponds to beep1 + surrounding
+            f"SPEAKER {rttm_file_id_stem} 1 1.400 1.000 <NA> <NA> SPEAKER_01 <NA> <NA>\\n"  # Some speech for S1
+            f"SPEAKER {rttm_file_id_stem} 1 2.800 0.700 <NA> <NA> SPEAKER_00 <NA> <NA>\\n"  # Corresponds to beep2 + surrounding
+        )
         with open(dummy_rttm_path, 'w') as f_rttm:
             f_rttm.write(rttm_content)
         logger.info(f"Created dummy RTTM: {dummy_rttm_path}")
 
-    # Test output directory for this run
-    current_test_output_dir = test_output_base_dir / "run_01_transcription_stage_output"
+    current_test_output_dir = test_output_base_dir / "run_01_transcription_output"
     current_test_output_dir.mkdir(parents=True, exist_ok=True)
     
     test_config = {
-        "whisper_model_name": "tiny.en",  # Use a small model for faster testing
+        "whisper_model_name": "tiny.en",
         "language_for_transcription": "en",
-        "min_segment_duration_ms_slicing": 100 # Low for dummy audio
+        "min_segment_duration_s": 0.2, # Allow short segments for test beeps
+        "merge_gap_s": 0.1,          # Small gap for merging
+        "fade_duration_ms": 20,
+        "min_words_for_filename": 2
     }
 
     logger.info(f"--- Test Parameters ---")
@@ -398,7 +443,7 @@ if __name__ == '__main__':
     logger.info(f"RTTM File: {dummy_rttm_path}")
     logger.info(f"Output Dir: {current_test_output_dir}")
     logger.info(f"PII Prefix: {test_pii_prefix}")
-    logger.info(f"Config: {test_config}")
+    logger.info(f"Config: {json.dumps(test_config, indent=2)}")
     logger.info(f"----------------------")
 
     if not dummy_vocal_stem_path.exists() or not dummy_rttm_path.exists():
@@ -414,14 +459,11 @@ if __name__ == '__main__':
 
         logger.info("--- Test Run Transcription Result ---")
         if result and result.get("transcript_json_path"):
-            logger.info(f"Transcription main JSON created at: {result['transcript_json_path']}")
-            logger.info(f"Soundbite speaker directories: {result.get('soundbite_speaker_dirs')}")
             logger.info(f"Message: {result.get('message')}")
-            
-            # You can inspect the contents of current_test_output_dir to verify soundbites
+            logger.info(f"Transcription main JSON: {result['transcript_json_path']}")
+            logger.info(f"Soundbite speaker dirs: {result.get('soundbite_speaker_dirs')}")
             logger.info(f"Please inspect the contents of: {current_test_output_dir}")
-            logger.info(f"And the main JSON: {result['transcript_json_path']}")
         else:
             logger.error(f"Test run_transcription failed or returned unexpected result: {result}")
 
-    logger.info("Transcription_module.py test run finished.") 
+    logger.info("Transcription_module.py (WhisperBite style) test run finished.") 
