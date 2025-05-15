@@ -1,17 +1,77 @@
 # System Patterns
 
 ## Architecture Overview
-The system employs a modular, workflow-driven architecture for audio processing and analysis. Key components include:
-1.  **Workflow Executor (`workflow_executor.py`):** The central orchestrator that reads a pipeline definition from a JSON file. It dynamically loads and executes a sequence of processing stages.
-2.  **JSON Workflow Definition (e.g., `default_audio_analysis_workflow.json`):** Defines the stages of the pipeline, including the module and function to call for each stage, how inputs are sourced (from original input or previous stages), stage-specific configurations, and how outputs are stored.
-3.  **Modular Processing Stages (Python Scripts):** Each distinct processing task is encapsulated in its own Python module/script. Current primary stages:
-    *   **CLAP Event Annotation (`clap_module.py`):** Integrates `ClapAnnotator` project to detect sound events. Handles its own audio separation internally using `audio-separator` library code.
-    *   **Audio Preprocessing (`audio_preprocessor.py`):** Handles further stem separation if needed (vocals/instrumentals using `audio-separator` CLI) and stem normalization (using `audiomentations`). Primary purpose is to prepare clean vocal and instrumental stems for subsequent stages.
-    *   **Speaker Diarization (`diarization_module.py`):** Identifies speaker segments using `pyannote.audio`.
-    *   **Transcription (`transcription_module.py`):** Converts speech to text using `openai-whisper`, guided by diarization output.
-    *   **LLM Analysis (`llm_module.py`):** Performs analysis or summarization using a Large Language Model (currently a placeholder).
-4.  **Input Audio File:** The initial audio file that the workflow processes.
-5.  **Timestamped Run Directories:** The executor creates a unique directory for each run (e.g., `runs/run_YYYYMMDD_HHMMSS/`) containing subdirectories for each stage's outputs, ensuring organized and isolated results.
+Two main Python scripts orchestrate the audio processing:
+1.  **`workflow_executor.py`**: This is the primary engine. It reads a workflow definition from a JSON file (e.g., `default_audio_analysis_workflow.json`) and executes a sequence of audio processing stages on individual audio files. It handles:
+    *   Dynamic loading of modules and functions for each stage.
+    *   Creation of unique, PII-safe run directories for each audio file processed (e.g., `workflow_runs_test/DefaultAudioAnalysisWorkflow_call_YYYYMMDD-HHMMSS_EXECUTOR_TIMESTAMP/`).
+    *   Management of data flow between stages via a context dictionary and path templating.
+    *   Passing a `pii_safe_file_prefix` (derived from the input audio filename, e.g., `call_YYYYMMDD-HHMMSS`) to each stage for consistent PII-safe naming of temporary files and primary outputs within that stage.
+    *   Batch processing of audio files from an input directory.
+    *   Conditional invocation of `call_processor.py` if the input directory is identified as a "call folder" (contains `recv_out-*` or `trans_out-*` files).
+2.  **`call_processor.py`**: This script is invoked by `workflow_executor.py` *after* all relevant individual `recv_out-*` and `trans_out-*` files in a call folder have been processed by the main workflow. Its purpose is to:
+    *   Identify pairs of processed `recv_out` and `trans_out` streams based on their PII-safe call ID (e.g., `call_YYYYMMDD-HHMMSS`).
+    *   Aggregate and combine outputs from these paired streams (e.g., mix audio, merge transcripts, generate combined summaries).
+    *   Save the final combined call data into a PII-safe directory structure (e.g., `processed_calls_test/call_YYYYMMDD-HHMMSS/`).
+
+**Processing Modules (called by `workflow_executor.py`):**
+*   **`clap_module.py`**: Detects sound events. Uses `pii_safe_file_prefix` for its temporary input copy and output JSON.
+*   **`audio_preprocessor.py`**: Separates audio stems (vocals/instrumental) and normalizes them. All its outputs (e.g., `call_YYYYMMDD-HHMMSS_vocals_normalized.wav`) use the `pii_safe_file_prefix`.
+*   **`diarization_module.py`**: Performs speaker diarization. Output RTTM file incorporates `pii_safe_file_prefix` (e.g., `call_YYYYMMDD-HHMMSS_vocals_normalized_diarization.rttm`).
+*   **`transcription_module.py`**: Transcribes speech, guided by diarization. Uses `pii_safe_file_prefix` for its main JSON output. **(Currently being updated to also output individual speaker soundbites (.wav/.txt) into speaker-specific subfolders within its stage output directory, with content-derived filenames, similar to `whisperBite.py`).**
+*   **`llm_module.py`**: Provides LLM functionalities. `run_llm_summary` (called by executor) produces per-stream summaries. `generate_llm_summary` (called by `call_processor.py`) produces combined call summaries.
+
+## Key Technical Decisions
+- **Two-Tier Processing:** `workflow_executor.py` handles per-file processing, and `call_processor.py` handles aggregation and finalization for call-type data.
+- **PII Safety in Naming:** Consistent use of `pii_safe_file_prefix` (timestamp-based identifiers like `call_YYYYMMDD-HHMMSS`) for all intermediate and final output directories and filenames to avoid PII leakage.
+- **Modular Design & Dynamic Loading:** Stages are independent Python modules, dynamically loaded by `workflow_executor.py`.
+- **JSON Workflow Definition:** Pipelines are defined in JSON, allowing flexibility.
+- **Path Templating for Data Flow:** For inter-stage data dependency management within `workflow_executor.py`.
+- **Targeted Soundbite Output (Transcription):** `transcription_module.py` is being refactored to produce detailed, speaker-segmented audio and text files, mirroring `whisperBite.py`'s output style.
+
+## Design Patterns
+- **Pipeline / Pipes and Filters:** Core pattern for `workflow_executor.py`.
+- **Orchestrator/Controller:** `workflow_executor.py` acts as an orchestrator for per-file processing; `call_processor.py` orchestrates call aggregation.
+- **Interpreter:** `workflow_executor.py` interprets the JSON workflow.
+- **Strategy Pattern:** Different modules can be used for similar tasks if configured in the workflow.
+- **Facade Pattern:** Modules abstract underlying libraries (Whisper, Pyannote, LMStudio SDK).
+
+## Component Relationships & Data Flow Example (Call Folder)
+1.  User runs `workflow_executor.py --input_dir /path/to/call_folder ...`
+2.  `workflow_executor.py` identifies it as a call folder.
+3.  For each `recv_out-*.wav` and `trans_out-*.wav` in the call folder:
+    a.  `workflow_executor.py` generates a `pii_safe_file_prefix` (e.g., `call_20250512-020958`).
+    b.  It creates a run directory: `workflow_runs_test/DefaultAudioAnalysisWorkflow_call_20250512-020958_EXECUTION_TS/`.
+    c.  It executes stages (clap, audio_preprocess, diarize, transcribe, llm_summary) on the input WAV.
+        i.  `audio_preprocessor.py` outputs `.../01_audio_preprocessing/call_20250512-020958_vocals_normalized.wav`.
+        ii. `diarization_module.py` outputs `.../02_speaker_diarization/call_20250512-020958_vocals_normalized_diarization.rttm`.
+        iii. **(Target)** `transcription_module.py` will output:
+            - `.../03_transcription/call_20250512-020958_transcription.json` (main JSON)
+            - `.../03_transcription/S0/0000_some_words.wav`
+            - `.../03_transcription/S0/0000_some_words.txt`
+            - `.../03_transcription/S1/0001_other_words.wav` (etc.)
+        iv. `llm_module.py` outputs `.../04_llm_summary_and_analysis/final_analysis_summary.txt` (per-stream summary).
+4.  After processing all individual files, `workflow_executor.py` calls `call_processor.py --input_run_dir workflow_runs_test/ ...`.
+5.  `call_processor.py`:
+    a.  Uses `find_call_pairs` to group `workflow_runs_test/DefaultAudioAnalysisWorkflow_call_20250512-020958_EXECUTION_TS/` and its `trans_out` counterpart.
+    b.  For each pair (e.g., `call_20250512-020958`):
+        i.  Creates output dir: `processed_calls_test/call_20250512-020958/`.
+        ii. Retrieves `vocals_normalized.wav` from both recv and trans workflow runs.
+        iii. Retrieves `_transcription.json` from both.
+        iv. **(Target)** Retrieves speaker subfolders (e.g., `S0/`, `S1/`) with soundbites from both.
+        v.  Mixes audio -> `.../call_20250512-020958_mixed_vocals.wav`.
+        vi. Merges JSONs -> `.../call_20250512-020958_merged_transcript.json`.
+        vii.Copies soundbite folders -> `.../S0_recv/`, `.../S0_trans/` (needs careful naming/merging strategy for soundbites from paired calls - TBD).
+        viii.Generates combined LLM summary -> `.../call_20250512-020958_combined_call_summary.txt`.
+
+## Key Libraries & Tools
+- `pyannote.audio`, `pyannote.database.util.RTTMParser`
+- `openai-whisper`
+- `pydub`
+- `lmstudio-python` (for LM Studio SDK)
+- `ffmpeg` (underlying utility)
+- `audio-separator` (CLI and library)
+- `audiomentations`
 
 ## Key Technical Decisions
 - **Workflow-Driven Architecture:** Adopting a flexible system where processing pipelines are defined externally (JSON) and executed by a generic engine, allowing for easier modification and extension of pipelines.

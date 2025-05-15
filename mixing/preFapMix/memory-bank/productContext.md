@@ -1,42 +1,41 @@
 # Product Context
 
 ## Problem Statement
-Audio recordings from various sources (at 8kHz) need to be properly processed, mixed, and transcribed for analysis. The current implementation has several limitations:
-1. It mixes 8kHz audio channels and then resamples the mix to 44.1kHz, resulting in quality loss
-2. It relies on fish-audio-processor for transcription, which uses an outdated Whisper model
-3. Output organization is not optimized for chronological review
-4. There's no separation between vocals and instrumentals, limiting clarity and transcription quality
-5. It doesn't properly pair and process both sides of a conversation (recv_out/trans_out files)
-6. There's no mechanism to create a unified "show" file with all calls in sequence
+Audio recordings from various sources (often at 8kHz) need to be processed, mixed (for calls), transcribed, and analyzed. Key challenges include:
+1. Ensuring high-quality audio processing, including proper resampling, stem separation, and loudness normalization.
+2. Using up-to-date transcription and diarization technologies for accuracy.
+3. Organizing outputs logically, especially for paired call data (`recv_out`/`trans_out`), in a PII-safe manner.
+4. Providing detailed, speaker-segmented transcriptions along with corresponding audio soundbites for easy review and use, similar to the output style of `whisperBite.py`.
+5. Generating useful summaries or analyses from the transcribed conversations.
 
-## Solution
-PreFapMix provides a streamlined pipeline to:
-1. Match recv_out/trans_out file pairs that belong to the same conversation (Handled by `audiotoolkit_phase1.py`, future integration into workflow TBD)
-2. Process each channel separately and chronologically
-3. Separate vocals from instrumentals (using `audio-separator` via `ClapAnnotator` and/or `audio_preprocessor.py`)
-4. Normalize vocal and instrumental stems to target LUFS values using `audiomentations` for clear differentiation.
-5. Properly resample each channel to 44.1kHz (Handled by specific modules as needed, e.g. `audio_preprocessor.py` ensures its output stems are at target SR)
-6. Transcribe vocals using `openai-whisper` library.
-7. Mix the resampled channels into stereo output with adjustable instrumental volume (Functionality of `audiotoolkit_phase1.py`, mixing within the new workflow is TBD or handled by summing stems in `audio_preprocessor.py` for mono paths currently)
-8. Normalize the final mixed output to a consistent LUFS target using `ffmpeg loudnorm`. (Part of `audiotoolkit_phase1.py`, can be a final stage in workflow)
-9. Generate complete conversation transcripts with speaker attribution (using `pyannote.audio` for diarization and `openai-whisper` for transcription).
-10. Organize outputs chronologically (Handled by workflow executor run directories).
-11. Generate consolidated "show files" with metadata including timestamps (Future feature).
-12. Provide both command-line and GUI interfaces (CLI is primary for workflow, GUI future).
+## Solution: The "PreFapMix" Workflow System
+This project implements a modular, workflow-driven system (`workflow_executor.py` and `call_processor.py`) to:
+1.  **Process Individual Audio Streams (`workflow_executor.py`):**
+    *   Detect sound events (CLAP).
+    *   Separate vocals from instrumentals (`audio_preprocessor.py`).
+    *   Normalize vocal and instrumental stems to target LUFS values.
+    *   Diarize speaker segments using `pyannote.audio` (`diarization_module.py`).
+    *   Transcribe vocals using `openai-whisper`, guided by diarization (`transcription_module.py`).
+        *   **Target Output:** This module is being enhanced to produce individual audio soundbites (`.wav`) and text files (`.txt`) for each speaker segment, organized into speaker-specific subdirectories (e.g., `S0/`, `S1/`) with content-derived filenames (e.g., `0001_some_words.wav`). This mirrors the desired output style of `whisperBite.py`.
+    *   Generate per-stream summaries using a local LLM via LM Studio (`llm_module.py`).
+    *   Maintain PII-safe naming for all intermediate outputs using timestamp-based identifiers (e.g., `call_YYYYMMDD-HHMMSS`).
+2.  **Aggregate and Finalize Call Data (`call_processor.py`):**
+    *   Identify and pair processed `recv_out` and `trans_out` streams based on their PII-safe call ID.
+    *   Mix audio from paired vocal stems into a stereo file.
+    *   Merge JSON transcripts from paired streams.
+    *   **Target:** Copy the detailed soundbite structures (speaker subdirectories with `.wav` and `.txt` files) from the transcription stage of each stream into the final call output directory.
+    *   Generate a combined LLM summary for the entire call.
+    *   Save all final outputs into a PII-safe call-specific directory (e.g., `processed_calls_test/call_YYYYMMDD-HHMMSS/`).
 
 ## User Experience Goals
-- Simple, intuitive interface with only essential controls
-- Clear visibility of processing options
-- Reliable and consistent output quality, especially regarding audio levels and vocal clarity.
-- Chronological organization of processed files
-- Complete conversation transcripts for both sides of communication
-- Adjustable mixing options for instrumental/vocal balance
-- Consolidated show output with detailed metadata
-- Minimal configuration required for standard workflows
+- **Reliable and Consistent Output Quality:** Clear audio, accurate transcription and diarization.
+- **Detailed and Usable Transcription Output:** Beyond a single JSON, provide individual speaker audio soundbites and their text, mirroring `whisperBite.py`'s utility for review and further use.
+- **PII Safety:** Ensure all generated filenames and directory names are free of personally identifiable information, relying on timestamps for identification.
+- **Organized Outputs:** Logically structured output directories for individual stream processing runs and for final aggregated call data.
+- **CLI-Driven Workflow:** Robust command-line interface for both `workflow_executor.py` and (indirectly) `call_processor.py`.
+- **Minimal Configuration for Standard Use:** Sensible defaults for most workflow parameters.
 
 ## Target Users
-- Audio analysts who need to process and transcribe conversations
-- Researchers working with audio data from different sources
-- Users who need to mix and normalize audio recordings for analysis
-- Content creators organizing communication recordings chronologically
-- Analysts who need both transcript content and full audio in an organized format 
+- Analysts needing to process, transcribe, and review call recordings or other audio communications.
+- Users requiring detailed, speaker-segmented audio soundbites alongside transcriptions.
+- Anyone needing to apply a consistent audio processing pipeline (separation, normalization, diarization, transcription, LLM summary) to a batch of audio files or call data. 
