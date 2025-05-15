@@ -2,146 +2,42 @@ import os
 import re
 import logging
 import argparse
+from pydub import AudioSegment
+import numpy as np
+import pyloudnorm as pyln
 import subprocess
 from datetime import datetime
 import shutil
 import gc
-import json
-import tempfile
 
 logging.basicConfig(level=logging.INFO)
 
-def run_ffmpeg_command(command, description):
-    """Run an FFmpeg command with proper logging."""
-    try:
-        process = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        logging.info(f"{description} completed successfully.")
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error(f"{description} failed with error: {e}")
-        logging.error(f"Error output: {e.stderr}")
-        return False
-    except Exception as ex:
-        logging.error(f"Unexpected error during {description}: {ex}")
-        return False
+def apply_soft_limiter(audio, target_level=-6.0):
+    peak = audio.max_dBFS
+    if peak > target_level:
+        gain_reduction = target_level - peak
+        logging.info(f"Applying soft limiter with gain reduction of {gain_reduction} dB")
+        return audio.apply_gain(gain_reduction)
+    return audio
 
-def get_audio_info(file_path):
-    """Get audio file information using FFmpeg."""
-    command = [
-        "ffmpeg", "-i", file_path, 
-        "-hide_banner", "-f", "null", "-"
-    ]
-    
-    audio_info = {'sample_rate': None, 'channels': None, 'duration': None}
-    
-    try:
-        result = subprocess.run(command, stderr=subprocess.PIPE, check=False, text=True)
-        stderr = result.stderr
-        
-        # Extract sample rate
-        sample_rate_match = re.search(r'(\d+) Hz', stderr)
-        if sample_rate_match:
-            audio_info['sample_rate'] = int(sample_rate_match.group(1))
-        
-        # Extract channel count
-        channel_match = re.search(r'Audio: .+?, (\d+) channels', stderr)
-        if channel_match:
-            audio_info['channels'] = int(channel_match.group(1))
-            
-        # Extract duration
-        duration_match = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', stderr)
-        if duration_match:
-            hours, minutes, seconds = duration_match.groups()
-            audio_info['duration'] = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-        
-        logging.info(f"Audio info for {file_path}: {audio_info}")
-        return audio_info
-    except Exception as e:
-        logging.error(f"Error getting audio info: {e}")
-        return audio_info
+def measure_and_normalize(audio, target_lufs=-14.0):
+    logging.info("Measuring LUFS and normalizing to target...")
 
-def normalize_audio_ffmpeg(input_file, output_file, target_lufs=-14.0, apply_limiter=True):
-    """Normalize audio to target LUFS using FFmpeg."""
-    limiter_filter = ":peak=0.97" if apply_limiter else ""
-    
-    command = [
-        "ffmpeg", "-y", "-i", input_file,
-        "-af", f"loudnorm=I={target_lufs}:TP=-1:LRA=11{limiter_filter}",
-        "-ar", "44100", output_file
-    ]
-    
-    return run_ffmpeg_command(command, f"Normalizing audio to {target_lufs} LUFS")
+    # Convert audio to raw data for pyloudnorm
+    raw_audio = np.array(audio.get_array_of_samples(), dtype=np.float32)
+    raw_audio /= np.iinfo(audio.array_type).max  # Normalize to -1.0 to 1.0 range
+    meter = pyln.Meter(audio.frame_rate)  # Create LUFS meter
 
-def resample_audio_ffmpeg(input_file, output_file, sample_rate=44100):
-    """Resample audio to target sample rate using FFmpeg."""
-    command = [
-        "ffmpeg", "-y", "-i", input_file,
-        "-ar", str(sample_rate), output_file
-    ]
-    
-    return run_ffmpeg_command(command, f"Resampling audio to {sample_rate} Hz")
+    # Measure loudness
+    loudness = meter.integrated_loudness(raw_audio)
+    logging.info(f"Current loudness: {loudness:.2f} LUFS")
 
-def mix_to_stereo_ffmpeg(left_file, right_file, output_file, left_pan=-0.2, right_pan=0.2, append_tones=False):
-    """Mix left and right channels to stereo using FFmpeg."""
-    # First, ensure both files are at the same sample rate (44.1kHz)
-    left_info = get_audio_info(left_file)
-    right_info = get_audio_info(right_file)
-    
-    temp_files = []
-    
-    # If sample rate is not 44100, resample
-    left_resampled = left_file
-    if left_info['sample_rate'] != 44100:
-        left_resampled = tempfile.mktemp(suffix='.wav')
-        temp_files.append(left_resampled)
-        resample_audio_ffmpeg(left_file, left_resampled)
-    
-    right_resampled = right_file
-    if right_info['sample_rate'] != 44100:
-        right_resampled = tempfile.mktemp(suffix='.wav')
-        temp_files.append(right_resampled)
-        resample_audio_ffmpeg(right_file, right_resampled)
-    
-    # Mix audio using FFmpeg's amerge and pan filters
-    filter_complex = f"[0:a]pan=stereo|c0={left_pan}*c0+{right_pan}*c1|c1={left_pan}*c0+{right_pan}*c1[left];[1:a]pan=stereo|c0={right_pan}*c0+{left_pan}*c1|c1={right_pan}*c0+{left_pan}*c1[right];[left][right]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[out]"
-    
-    command = [
-        "ffmpeg", "-y", 
-        "-i", left_resampled,
-        "-i", right_resampled,
-        "-filter_complex", filter_complex,
-        "-map", "[out]",
-        output_file
-    ]
-    
-    success = run_ffmpeg_command(command, "Mixing stereo channels")
-    
-    # Append tones if requested
-    if success and append_tones and os.path.exists("tones.wav"):
-        temp_output = tempfile.mktemp(suffix='.wav')
-        temp_files.append(temp_output)
-        
-        # Move the mixed file to temp
-        shutil.copy2(output_file, temp_output)
-        
-        # Concatenate with tones
-        command = [
-            "ffmpeg", "-y",
-            "-i", temp_output,
-            "-i", "tones.wav",
-            "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1[out]",
-            "-map", "[out]",
-            output_file
-        ]
-        
-        success = run_ffmpeg_command(command, "Appending tones")
-    
-    # Clean up temp files
-    for temp_file in temp_files:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-    
-    return success
+    # Calculate required gain for normalization
+    gain = target_lufs - loudness
+    normalized_audio = audio.apply_gain(gain)
+
+    logging.info(f"Applied gain: {gain:.2f} dB")
+    return normalized_audio
 
 def sanitize_text(text):
     sanitized = re.sub(r'[^\w\s]', '', text)
@@ -221,9 +117,7 @@ def rename_and_copy_sliced_files(input_dir, target_dir, side):
                 shutil.copy2(source_path, target_path)
                 logging.info(f".lab file copied to {target_path}")
 
-def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe_right=False, 
-                       append_tones=False, normalize_audio=False, target_lufs=-14.0, 
-                       target_sample_rate=44100, left_pan=-0.2, right_pan=0.2, num_workers=2):
+def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe_right=False, append_tones=False, normalize_audio=False, target_lufs=-14.0, num_workers=2):
     logging.info("Starting audio processing")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = os.path.join(output_dir, f"run_{timestamp}")
@@ -247,28 +141,24 @@ def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe
         logging.info(f"Processing file: {filename}")
         
         try:
+            audio = AudioSegment.from_file(file_path)
+            limited_audio = apply_soft_limiter(audio)
+            normalized_audio = measure_and_normalize(limited_audio, target_lufs) if normalize_audio else limited_audio
+            
             normalized_path = os.path.join(normalized_dir, filename)
-            
-            if normalize_audio:
-                normalize_audio_ffmpeg(file_path, normalized_path, target_lufs)
-            else:
-                # Just copy the file or resample it if needed
-                audio_info = get_audio_info(file_path)
-                if audio_info['sample_rate'] != target_sample_rate:
-                    resample_audio_ffmpeg(file_path, normalized_path, target_sample_rate)
-                else:
-                    shutil.copy2(file_path, normalized_path)
-            
+            normalized_audio.export(normalized_path, format="wav")
             os.utime(normalized_path, (file_timestamp, file_timestamp))
             logging.info(f"Processed audio saved to {normalized_path}")
+
+            del audio, limited_audio, normalized_audio
+            gc.collect()
 
         except Exception as e:
             logging.error(f"Error processing {filename}: {e}")
             continue
 
     channel_pairs = identify_channel_pairs(normalized_dir)
-    process_channel_pairs(channel_pairs, left_dir, right_dir, stereo_dir, 
-                          append_tones, target_sample_rate, left_pan, right_pan)
+    process_channel_pairs(channel_pairs, left_dir, right_dir, stereo_dir, append_tones)
 
     if transcribe_left:
         slicing(left_dir, left_dir)
@@ -292,45 +182,45 @@ def identify_channel_pairs(normalized_dir):
 
     return pairs
 
-def process_channel_pairs(pairs, left_dir, right_dir, stereo_dir, append_tones, 
-                          target_sample_rate=44100, left_pan=-0.2, right_pan=0.2):
+def process_channel_pairs(pairs, left_dir, right_dir, stereo_dir, append_tones):
     for base_name, channels in pairs.items():
         left_path = channels.get('left')
         right_path = channels.get('right')
 
         if left_path:
-            save_channel_audio(left_path, left_dir, target_sample_rate)
+            save_channel_audio(left_path, left_dir)
         if right_path:
-            save_channel_audio(right_path, right_dir, target_sample_rate)
+            save_channel_audio(right_path, right_dir)
         
         if left_path and right_path:
-            stereo_output_path = os.path.join(stereo_dir, f"{base_name}_stereo.wav")
-            mix_to_stereo_ffmpeg(left_path, right_path, stereo_output_path, 
-                                left_pan, right_pan, append_tones)
-            
-            # Preserve timestamp
-            if os.path.exists(left_path):
-                os.utime(stereo_output_path, (os.path.getmtime(left_path), os.path.getmtime(left_path)))
+            mix_to_stereo(left_path, right_path, stereo_dir, base_name, append_tones)
 
-def save_channel_audio(audio_path, target_dir, target_sample_rate=44100):
+def save_channel_audio(audio_path, target_dir):
     filename = os.path.basename(audio_path)
     output_path = os.path.join(target_dir, filename)
-    
-    # Get audio info
-    audio_info = get_audio_info(audio_path)
-    
-    # If sample rate needs changing, resample
-    if audio_info['sample_rate'] != target_sample_rate:
-        resample_audio_ffmpeg(audio_path, output_path, target_sample_rate)
-    else:
-        shutil.copy2(audio_path, output_path)
-    
-    # Preserve timestamp
+    AudioSegment.from_file(audio_path).export(output_path, format="wav")
     os.utime(output_path, (os.path.getmtime(audio_path), os.path.getmtime(audio_path)))
     logging.info(f"Channel audio saved to {output_path}")
 
+def mix_to_stereo(left_path, right_path, stereo_dir, base_name, append_tones):
+    try:
+        left_audio = AudioSegment.from_file(left_path).pan(-0.2)
+        right_audio = AudioSegment.from_file(right_path).pan(0.2)
+        stereo_audio = left_audio.overlay(right_audio)
+
+        if append_tones:
+            tones = AudioSegment.from_file("tones.wav")
+            stereo_audio += tones
+
+        stereo_output_path = os.path.join(stereo_dir, f"{base_name}_stereo.wav")
+        stereo_audio.export(stereo_output_path, format="wav")
+        os.utime(stereo_output_path, (os.path.getmtime(left_path), os.path.getmtime(left_path)))
+        logging.info(f"Stereo output saved to {stereo_output_path}")
+    except Exception as e:
+        logging.error(f"Error mixing stereo channels for {base_name}: {e}")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process audio files with FFmpeg for proper resampling, normalization, and stereo mixing.")
+    parser = argparse.ArgumentParser(description="Process audio files with soft limiting, LUFS normalization, and optional transcription.")
     parser.add_argument("--input-dir", required=True, help="Directory containing input audio files")
     parser.add_argument("--output-dir", required=True, help="Directory where output will be saved")
     parser.add_argument("--transcribe", action="store_true", help="Enable transcription for both left and right channels")
@@ -339,9 +229,6 @@ if __name__ == "__main__":
     parser.add_argument("--tones", action="store_true", help="Append 'tones.wav' to the end of stereo output files")
     parser.add_argument("--normalize", action="store_true", help="Enable loudness normalization")
     parser.add_argument("--target-lufs", type=float, default=-14.0, help="Target loudness in LUFS (default: -14)")
-    parser.add_argument("--target-sample-rate", type=int, default=44100, help="Target sample rate in Hz (default: 44100)")
-    parser.add_argument("--left-pan", type=float, default=-0.2, help="Pan value for left channel (-1.0 to 1.0, default: -0.2)")
-    parser.add_argument("--right-pan", type=float, default=0.2, help="Pan value for right channel (-1.0 to 1.0, default: 0.2)")
     parser.add_argument("--num-workers", type=int, default=2, help="Number of workers for transcription (default: 2)")
 
     args = parser.parse_args()
@@ -357,8 +244,5 @@ if __name__ == "__main__":
         append_tones=args.tones,
         normalize_audio=args.normalize,
         target_lufs=args.target_lufs,
-        target_sample_rate=args.target_sample_rate,
-        left_pan=args.left_pan,
-        right_pan=args.right_pan,
         num_workers=args.num_workers
     )
