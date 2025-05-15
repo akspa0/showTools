@@ -15,16 +15,17 @@
 ## Goals
 - Fix existing sample rate conversion issues (currently mixing 8kHz channels then resampling the mix)
 - Use ffmpeg for proper audio processing and normalization (including final mix loudness)
-- Integrate python-audio-separator for vocal/instrumental separation
+- Integrate python-audio-separator for vocal/instrumental separation (used within `ClapAnnotator` and `audio_preprocessor.py`)
 - Utilize audiomentations for effective stem loudness normalization
 - Achieve a well-balanced mix with prominent vocals and controlled instrumental levels
 - Ensure the final mixed output has appropriate and consistent loudness
-- Replace fish-audio-processor (fap) with OpenAI Whisper for better transcription
+- Replace fish-audio-processor (fap) with OpenAI Whisper (via `openai-whisper` library) for transcription.
+- Integrate speaker diarization (e.g., using `pyannote.audio`).
 - Generate chronologically ordered outputs
 - Create show files that combine all calls in sequence with proper metadata
 - Use transcription content for intelligent call naming
 - Allow customization of instrumental volume in final mixes
-- Create a simple, focused pipeline that borrows the best elements from previous tools
-- Maintain a straightforward, efficient workflow without unnecessary complexity
-- Provide a simple and efficient user interface for essential options
+- Create a simple, focused, **and modular workflow-driven pipeline** (managed by `workflow_executor.py` and JSON definitions) that borrows the best elements from previous tools
+- Maintain a straightforward, efficient **and configurable** workflow without unnecessary complexity
+- Provide a simple and efficient user interface for essential options (CLI currently, GUI is a longer-term goal)
 - Support batch processing of multiple audio files 

@@ -11,18 +11,18 @@ Audio recordings from various sources (at 8kHz) need to be properly processed, m
 
 ## Solution
 PreFapMix provides a streamlined pipeline to:
-1. Match recv_out/trans_out file pairs that belong to the same conversation
+1. Match recv_out/trans_out file pairs that belong to the same conversation (Handled by `audiotoolkit_phase1.py`, future integration into workflow TBD)
 2. Process each channel separately and chronologically
-3. Separate vocals from instrumentals using python-audio-separator
+3. Separate vocals from instrumentals (using `audio-separator` via `ClapAnnotator` and/or `audio_preprocessor.py`)
 4. Normalize vocal and instrumental stems to target LUFS values using `audiomentations` for clear differentiation.
-5. Properly resample each channel to 44.1kHz
-6. Transcribe vocals using OpenAI Whisper (large-v3 model)
-7. Mix the resampled channels into stereo output with adjustable instrumental volume
-8. Normalize the final mixed output to a consistent LUFS target using `ffmpeg loudnorm`.
-9. Generate complete conversation transcripts with speaker attribution
-10. Organize outputs chronologically
-11. Generate consolidated "show files" with metadata including timestamps
-12. Provide both command-line and GUI interfaces
+5. Properly resample each channel to 44.1kHz (Handled by specific modules as needed, e.g. `audio_preprocessor.py` ensures its output stems are at target SR)
+6. Transcribe vocals using `openai-whisper` library.
+7. Mix the resampled channels into stereo output with adjustable instrumental volume (Functionality of `audiotoolkit_phase1.py`, mixing within the new workflow is TBD or handled by summing stems in `audio_preprocessor.py` for mono paths currently)
+8. Normalize the final mixed output to a consistent LUFS target using `ffmpeg loudnorm`. (Part of `audiotoolkit_phase1.py`, can be a final stage in workflow)
+9. Generate complete conversation transcripts with speaker attribution (using `pyannote.audio` for diarization and `openai-whisper` for transcription).
+10. Organize outputs chronologically (Handled by workflow executor run directories).
+11. Generate consolidated "show files" with metadata including timestamps (Future feature).
+12. Provide both command-line and GUI interfaces (CLI is primary for workflow, GUI future).
 
 ## User Experience Goals
 - Simple, intuitive interface with only essential controls
