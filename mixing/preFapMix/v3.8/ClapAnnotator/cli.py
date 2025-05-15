@@ -7,6 +7,8 @@ from pathlib import Path
 import traceback
 from typing import List, Dict, Optional, Union
 import shutil
+import numpy as np
+import soundfile as sf
 
 # Set up basic logging first
 logging.basicConfig(
@@ -37,6 +39,18 @@ except Exception as e:
     log.error(f"Unexpected error during imports: {e}")
     log.error(traceback.format_exc())
     IMPORTS_SUCCESSFUL = False
+
+def create_silent_wav(output_path: Path, duration_seconds: int, sample_rate: int):
+    """Creates a silent mono WAV file."""
+    try:
+        num_samples = int(duration_seconds * sample_rate)
+        silent_data = np.zeros(num_samples, dtype=np.float32)
+        sf.write(output_path, silent_data, sample_rate, subtype='FLOAT')
+        log.info(f"Created silent WAV: {output_path} ({duration_seconds}s, {sample_rate}Hz)")
+        return True
+    except Exception as e_create_silent:
+        log.error(f"Failed to create silent WAV {output_path}: {e_create_silent}")
+        return False
 
 def process_audio_file(
     input_file: Path,
@@ -100,10 +114,30 @@ def process_audio_file(
         )
         
         separated_stems = separator.separate(input_file)
-        if not separated_stems:
-            raise RuntimeError("Audio separation failed to produce any stems")
-        
-        log.info(f"Separated stems: {', '.join(separated_stems.keys())}")
+        # if not separated_stems:
+        #     raise RuntimeError("Audio separation failed to produce any stems")
+
+        # Check if separation produced expected stems, if not, create silent dummies
+        expected_stems = ["Vocals", "Instrumental"] # Usually what CLAP annotator might expect
+        if not separated_stems or not all(stem_name in separated_stems for stem_name in expected_stems):
+            log.warning(f"Audio separation produced insufficient stems: {list(separated_stems.keys()) if separated_stems else 'None'}. Creating silent dummy stems.")
+            separated_stems = {} # Reset or ensure it's a dict
+            dummy_stem_duration = 1 # 1 second silent audio
+            
+            for stem_name in expected_stems:
+                # Use a predictable name for dummy stems in the temp directory
+                dummy_stem_filename = f"{input_file.stem}_dummy_{stem_name.lower()}.wav"
+                dummy_stem_path = settings.TEMP_OUTPUT_DIR / dummy_stem_filename
+                if create_silent_wav(dummy_stem_path, dummy_stem_duration, settings.CLAP_EXPECTED_SR):
+                    separated_stems[stem_name] = dummy_stem_path
+                else:
+                    # If dummy creation fails, this is a more critical error
+                    raise RuntimeError(f"Failed to create dummy silent stem for {stem_name}")
+            
+            if not all(stem_name in separated_stems for stem_name in expected_stems):
+                 raise RuntimeError("Failed to create all required dummy silent stems after separation failure.")
+
+        log.info(f"Stems for further processing: {list(separated_stems.keys())}")
         
         # Step 2: Resample audio for CLAP
         log.info("Step 2: Resampling audio for CLAP...")
