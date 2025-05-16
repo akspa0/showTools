@@ -30,6 +30,8 @@ Successfully implement all stages of the audio processing workflow, including ro
 
 *   **Terminal Echo Culprit:** Suspects include `clap_module` (due to `audio-separator` external process), `audio_preprocessor` (`ffmpeg`), or other libraries that might manipulate terminal state without proper restoration.
 *   **Defining LLM Utility (USER INPUT STILL KEY):** While imports are fixed, the *purpose* of the LLM summaries needs user validation and refinement to ensure the prompts and outputs are valuable.
+*   **Future Use of Structured Transcripts:** Consider how the detailed structured JSON transcripts (not just the plain text `master_transcript.txt`) could be used in the future for more advanced LLM tasks, such as show-level synopses or fine-grained Q&A. This influences how we might want to store or make these JSON files accessible in later processing stages (e.g., in `call_processor.py`).
+*   **Desired `05_final_output` Structure (for `call_processor.py`):** The final aggregated output for a call (e.g., in a hypothetical `05_final_output` stage managed by `call_processor.py`) should ideally include an LLM-derived call name, the LLM-generated call synopsis, copies of (or links to) the relevant soundbites, and the master transcript data (both JSON and TXT formats).
 
 ## Open Questions
 

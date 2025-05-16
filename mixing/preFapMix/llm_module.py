@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import lmstudio as lms
+from openai import OpenAI
 
 # Removed all attempts to import submodules for exceptions, as introspection shows they are direct attributes of lms
 
@@ -31,45 +32,58 @@ def _format_clap_events_for_prompt(clap_events_data):
     """
     Formats CLAP event data into a string for the LLM prompt.
     Handles cases where events might be missing or malformed.
+    Now expects CLAP data to be the parsed JSON from ClapAnnotator v3.8,
+    and will extract detections from within the 'stems' structure.
     """
     if not clap_events_data or not isinstance(clap_events_data, dict):
         logger.warning("[LLM Summary] CLAP events data is missing or not in expected dict format.")
         return "No sound events detected or data is malformed."
 
+    all_detections = []
+    stems_data = clap_events_data.get("stems")
+
+    if not stems_data or not isinstance(stems_data, dict):
+        logger.warning("[LLM Summary] CLAP JSON data does not contain a 'stems' dictionary or it's not a dict.")
+        # Fallback: Check if legacy top-level keys exist, though unlikely for this new structure
+        legacy_events_list = None
+        for key in ["clap_events", "events", "detections", "segments"]:
+            if isinstance(clap_events_data.get(key), list):
+                legacy_events_list = clap_events_data.get(key)
+                logger.warning(f"[LLM Summary] CLAP data missing 'stems', but found legacy list under '{key}'. Processing this list.")
+                all_detections = legacy_events_list
+                break
+        if not legacy_events_list:
+            return "Sound event data found but 'stems' structure not recognized or events list is missing."
+    else:
+        # New structure: Iterate through stems and collect all detections
+        for stem_name, stem_details in stems_data.items():
+            if isinstance(stem_details, dict):
+                detections_list = stem_details.get("detections")
+                if isinstance(detections_list, list):
+                    for detection in detections_list: # Add stem_name to detection for clarity
+                        if isinstance(detection, dict):
+                            detection['_stem_source'] = stem_name # Add context about which stem it came from
+                            all_detections.append(detection)
+                else:
+                    logger.warning(f"[LLM Summary] No 'detections' list found for stem '{stem_name}' or it's not a list.")
+            else:
+                logger.warning(f"[LLM Summary] Stem details for '{stem_name}' is not a dictionary.")
+
+    if not all_detections:
+        return "No sound events detected after parsing stems."
+
     formatted_events = []
-    # Check for the main 'clap_events' list, which is the structure output by ClapAnnotator wrapper
-    events_list = clap_events_data.get("clap_events")
-    
-    # If "clap_events" key doesn't exist, maybe the data is a direct list or another structure?
-    # This part is an attempt to handle slightly different structures gracefully.
-    if events_list is None:
-        # If the root is a list, assume it's the events_list
-        if isinstance(clap_events_data, list):
-            events_list = clap_events_data
-            logger.warning("[LLM Summary] CLAP data was a direct list, not a dict with 'clap_events' key. Processing as list.")
-        # If it's a dict but doesn't have "clap_events", look for other common top-level list keys
-        elif isinstance(clap_events_data, dict):
-            for key in ["events", "detections", "segments"]:
-                if isinstance(clap_events_data.get(key), list):
-                    events_list = clap_events_data.get(key)
-                    logger.warning(f"[LLM Summary] CLAP data missing 'clap_events' key, but found list under '{key}'. Processing this list.")
-                    break
-            if events_list is None:
-                logger.warning("[LLM Summary] CLAP data is a dict but does not contain a recognized events list (e.g., 'clap_events').")
-                return "Sound event data found but structure not recognized or events list is missing."
-
-    if not events_list: # if events_list is empty or became None
-        return "No sound events detected."
-
-    for event in events_list:
+    for event in all_detections:
         if not isinstance(event, dict):
-            logger.warning(f"[LLM Summary] Skipping non-dict event in CLAP data: {event}")
+            logger.warning(f"[LLM Summary] Skipping non-dict event in collected detections: {event}")
             continue
         label = event.get("label", "Unknown Event")
-        start_time = event.get("start_time_seconds", "N/A")
-        end_time = event.get("end_time_seconds", "N/A")
+        start_time = event.get("start_time_seconds", event.get("start_time", "N/A")) # Accommodate different key names potentially
+        end_time = event.get("end_time_seconds", event.get("end_time", "N/A"))
         confidence = event.get("confidence", "N/A")
-        formatted_events.append(f"- Event: {label}, Start: {start_time}s, End: {end_time}s, Confidence: {confidence}")
+        stem_source = event.get("_stem_source", "main audio") # Default if not added
+        
+        formatted_events.append(f"- Event: {label} (Source: {stem_source}), Start: {start_time}s, End: {end_time}s, Confidence: {confidence}")
     
     if not formatted_events:
         return "No valid sound events found after parsing."
@@ -103,20 +117,30 @@ def run_llm_summary(
 
     # LM Studio Model Identifier from config
     lm_studio_model_identifier = config.get('lm_studio_model_identifier', 'NousResearch/Hermes-2-Pro-Llama-3-8B') 
-    logger.info(f"[LLM Summary] Attempting to use LM Studio model: {lm_studio_model_identifier}")
+    # LM Studio Base URL from config
+    lm_studio_base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+    lm_studio_api_key = config.get('lm_studio_api_key', 'lm-studio') # Often 'lm-studio' or can be empty
+
+    logger.info(f"[LLM Summary] Attempting to use LM Studio model: {lm_studio_model_identifier} via {lm_studio_base_url}")
 
     # Load and format transcript
     transcript_prompt_text = "Could not load transcript."
     if transcript_file_path and Path(transcript_file_path).exists():
         try:
             with open(transcript_file_path, 'r', encoding='utf-8') as f_trans:
-                transcript_data = json.load(f_trans)
-                transcript_prompt_text = _format_transcript_for_prompt(transcript_data)
+                # Directly read the content of the .txt file
+                transcript_prompt_text = f_trans.read()
+                if not transcript_prompt_text.strip(): # Check if file is empty or only whitespace
+                    transcript_prompt_text = "Transcript file was found but is empty."
+                    logger.warning(f"[LLM Summary] Transcript file {transcript_file_path} is empty.")
+                else:
+                    logger.info(f"[LLM Summary] Successfully loaded transcript text from {transcript_file_path}.")
         except Exception as e_read_trans:
-            transcript_prompt_text = f"Error reading or parsing transcript: {e_read_trans}"
+            transcript_prompt_text = f"Error reading transcript file: {e_read_trans}"
             logger.error(f"[LLM Summary] Error reading transcript file {transcript_file_path}: {e_read_trans}")
     else:
         logger.warning(f"[LLM Summary] Transcript file not found or not provided: {transcript_file_path}")
+        transcript_prompt_text = "Transcript file path was not provided or the file does not exist." # More specific message
 
     # Load and format CLAP events
     clap_events_prompt_text = "No CLAP events information available."
@@ -153,68 +177,54 @@ Please generate a summary of the conversation:
     final_summary_file_path = output_dir / "final_analysis_summary.txt"
 
     try:
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing LM Studio model handle: {lm_studio_model_identifier}")
-        # --- Use Convenience API as per docs --- 
-        model = lms.llm(lm_studio_model_identifier) # Get model handle
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Model handle obtained for {lm_studio_model_identifier}")
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing OpenAI client for LM Studio: {lm_studio_base_url}")
+        
+        client = OpenAI(
+            base_url=lm_studio_base_url,
+            api_key=lm_studio_api_key, # api_key is often not strictly required by LM Studio but good to include
+        )
+        
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] OpenAI client initialized for LM Studio.")
         
         # The prompt is already constructed above
         # Configurable parameters for the chat completion, e.g., temperature, max_tokens
         temperature = config.get('lm_studio_temperature', 0.7)
         max_tokens = config.get('lm_studio_max_tokens', 500)
+        # System prompt can also be made configurable
+        system_prompt_content = config.get('llm_system_prompt', "You are an AI assistant. Your task is to provide a concise summary of the conversation transcript. Incorporate information about notable sound events if they provide relevant context.")
 
         logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Sending request to LM Studio model: {lm_studio_model_identifier}. Temp: {temperature}, MaxTokens: {max_tokens}")
         
-        # Using model.respond() as per documentation
-        # The prompt variable here contains the full text including instructions and data
-        response = model.respond(
-            prompt,
-            config={"temperature": temperature, "max_tokens": max_tokens}
+        completion = client.chat.completions.create(
+            model=lm_studio_model_identifier,
+            messages=[
+                {"role": "system", "content": system_prompt_content},
+                {"role": "user", "content": prompt} # 'prompt' contains the main user-facing prompt and data
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens
         )
         
-        # Assuming response is either a string or an object with a .content attribute or similar
-        # Based on `print(model.respond("What is the meaning of life?"))` in docs, it might be directly a string.
-        if isinstance(response, str):
-            summary_content = response.strip()
-        elif hasattr(response, 'content') and isinstance(response.content, str):
-            summary_content = response.content.strip()
-        elif hasattr(response, 'choices') and response.choices and hasattr(response.choices[0], 'message') and hasattr(response.choices[0].message, 'content'):
-            # This structure is more like the OpenAI client or the previous LMSClient() attempt
-            # Keeping it as a fallback interpretation if the convenience API returns a richer object
-            summary_content = response.choices[0].message.content.strip()
+        if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
+            summary_content = completion.choices[0].message.content.strip()
+            logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Summary received successfully from LM Studio.")
         else:
-            # If the response structure is unknown, log it for debugging
-            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Unexpected response structure from model.respond(): {type(response)} - {str(response)[:500]}")
-            summary_content = f"LM Studio Error: Unexpected response structure from model '{lm_studio_model_identifier}'."
+            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Unexpected response structure from LM Studio: {completion}")
+            summary_content = "LLM Summarization failed due to unexpected response structure."
 
-        if summary_content and not summary_content.startswith("LM Studio Error:"):
-            logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Successfully received summary from LM Studio model.")
-        # --- End Convenience API Usage ---
-
-    except lms.LMStudioModelNotFoundError as e_model_nf:
-        summary_content = f"LM Studio Model Not Found Error: {e_model_nf}. Ensure model '{lm_studio_model_identifier}' is available and correctly named."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except lms.LMStudioServerError as e_server:
-        summary_content = f"LM Studio Server Error: {e_server}. Check LM Studio server status and logs."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except lms.LMStudioPredictionError as e_pred:
-        summary_content = f"LM Studio Prediction Error: {e_pred}."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except lms.LMStudioClientError as e_client: # More general client-side LMStudio error
-        summary_content = f"LM Studio Client Error: {e_client}."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except lms.LMStudioError as e_lms: # Generic LMStudio base error
-        summary_content = f"Generic LM Studio Error: {e_lms}. Model: '{lm_studio_model_identifier}'."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except Exception as e_llm: # Broad exception for other unexpected errors
-        # The original error message included the model identifier and a hint to check if it's loaded.
-        # We should try to preserve that if possible, or make the new error equally informative.
-        summary_content = f"LM Studio Error: An unexpected error occurred: {e_llm}. Ensure LM Studio is running, the model '{lm_studio_model_identifier}' is loaded/served, and the server is accessible."
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio client or model interaction error: {e_llm}", exc_info=True)
+    except lms.LMStudioAPIError as e: # Catching specific lmstudio errors if they still can occur through OpenAI client or underlying http
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio API Error: {e}")
+        summary_content = f"LLM Summarization failed due to LM Studio API Error: {e}"
+    except Exception as e: # General catch-all for other errors like httpx.ConnectError
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio Client Error:\\n    {e}")
+        summary_content = f"LLM Summarization failed due to Client Error: {e}"
+        # More detailed error logging for connection issues
+        if "All connection attempts failed" in str(e) or "Connection refused" in str(e):
+            logger.error(f"    Is LM Studio running and accessible at {lm_studio_base_url}?.")
 
     try:
-        with open(final_summary_file_path, 'w', encoding='utf-8') as f:
-            f.write(summary_content)
+        with open(final_summary_file_path, 'w', encoding='utf-8') as f_sum:
+            f_sum.write(summary_content)
         logger.info(f"[LLM Summary] Summary saved to: {final_summary_file_path}")
         if "failed" in summary_content.lower() or "error" in summary_content.lower() or "ensure lm studio is running" in summary_content.lower():
              return {"summary_text_file_path": str(final_summary_file_path), "analysis_complete": False, "error": summary_content}

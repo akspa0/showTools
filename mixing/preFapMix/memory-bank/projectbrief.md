@@ -29,4 +29,7 @@
 - Integrate local LLM processing via LM Studio for summaries and analysis.
 - Maintain a straightforward, efficient, and configurable CLI-driven workflow.
 - Support batch processing of audio files and call folders.
-- Ensure all intermediate and final outputs are organized logically and named in a PII-safe manner. 
+- Ensure all intermediate and final outputs are organized logically and named in a PII-safe manner.
+
+## Future Enhancements
+- **Utilize Structured JSON Transcripts:** Leverage the detailed, structured JSON output from the transcription stage (containing word-level timestamps and granular segment data) for more advanced LLM tasks. This could include creating highly detailed, chronologically accurate show-level synopses by combining multiple call transcripts, enabling fine-grained Q&A about *when* specific things were said, improving event correlation, and providing richer data for potential LLM fine-tuning in the future. 

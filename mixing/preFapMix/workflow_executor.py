@@ -13,7 +13,7 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 # --- For Debugging: Set to a stage name to run only that stage, or None to run all --- 
-DEBUG_SINGLE_STAGE_NAME = "audio_preprocessing" # Changed from clap_event_annotation
+DEBUG_SINGLE_STAGE_NAME = None # Changed from clap_event_annotation
 # Example stage names: "clap_event_annotation", "audio_preprocessing", "speaker_diarization", "transcription", "llm_summary_and_analysis"
 
 def setup_workflow_logging(log_level_str='INFO', log_file=None):
