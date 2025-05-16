@@ -10,6 +10,9 @@ import argparse
 import subprocess
 import threading
 import queue
+import soundfile as sf
+import numpy as np
+import mutagen
 
 # Global logger for the executor
 logger = logging.getLogger(__name__)
@@ -353,6 +356,77 @@ def execute_workflow(workflow_file_path: str, input_audio_file_str: str, base_ou
         return False # Indicate partial or full failure
     return True # Indicate success
 
+def segment_audio_by_clap_annotations(
+    normalized_audio_path: Path,
+    clap_json_path: Path,
+    output_dir: Path,
+    min_segment_duration: float = 5.0
+) -> list:
+    """
+    Segments the normalized audio using Instrumental detections from the CLAP annotation JSON.
+    Returns a list of output segment file paths.
+    """
+    import subprocess
+    import json
+    import math
+    logger = logging.getLogger(__name__)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(clap_json_path, 'r') as f:
+        clap_data = json.load(f)
+    detections = clap_data.get('detections', [])
+    segments = []
+    for idx, det in enumerate(detections):
+        start = float(det.get('start_time_s', 0))
+        end = float(det.get('end_time_s', 0))
+        if end - start < min_segment_duration:
+            continue
+        segment_path = output_dir / f"segment_{idx+1:03d}_{math.floor(start)}s_{math.floor(end)}s.wav"
+        ffmpeg_cmd = [
+            'ffmpeg', '-y', '-i', str(normalized_audio_path),
+            '-ss', str(start), '-to', str(end),
+            '-c', 'copy', str(segment_path)
+        ]
+        logger.info(f"Cutting segment {idx+1}: {start}s to {end}s -> {segment_path}")
+        subprocess.run(ffmpeg_cmd, check=False)
+        if segment_path.exists():
+            segments.append(str(segment_path))
+    logger.info(f"Created {len(segments)} CLAP-based segments in {output_dir}")
+    return segments
+
+def extract_audio_metadata(input_path: Path) -> dict:
+    """Extracts audio metadata using ffprobe."""
+    import subprocess
+    cmd = [
+        'ffprobe', '-v', 'error', '-show_entries',
+        'format=bit_rate,duration,format_name',
+        '-show_streams', '-of', 'json', str(input_path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {}
+    data = json.loads(result.stdout)
+    # Extract relevant fields
+    info = {
+        'bitrate': None,
+        'channels': None,
+        'sample_rate': None,
+        'codec': None,
+        'duration': None,
+        'format': None
+    }
+    fmt = data.get('format', {})
+    info['bitrate'] = int(fmt.get('bit_rate', 0)) // 1000 if fmt.get('bit_rate') else None
+    info['duration'] = float(fmt.get('duration', 0))
+    info['format'] = fmt.get('format_name')
+    # Use first audio stream
+    for stream in data.get('streams', []):
+        if stream.get('codec_type') == 'audio':
+            info['channels'] = stream.get('channels')
+            info['sample_rate'] = int(stream.get('sample_rate', 0))
+            info['codec'] = stream.get('codec_name')
+            break
+    return info
+
 def main():
     parser = argparse.ArgumentParser(description="Execute an audio processing workflow from a JSON definition.")
     parser.add_argument("--config_file", type=str, required=True, help="Path to the workflow JSON configuration file.")
@@ -360,27 +434,13 @@ def main():
     # Input can be a single file or a directory
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--input_file", "--input_audio_file", dest="input_audio_file", type=str, help="Path to a single input audio file.")
-    input_group.add_argument("--input_dir", type=str, help="Path to a directory of audio files to process.")
-    
-    parser.add_argument("--output_dir", type=str, required=True, help="Base directory for workflow run outputs.")
-    parser.add_argument("--log_level", type=str, default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Logging level.")
-
-    # New arguments for call_processor integration
-    parser.add_argument(
-        "--final_call_output_dir",
-        type=str,
-        default=None, # Optional
-        help="Base directory to save final combined call outputs. If provided and input_dir "
-             "contains recv_out/trans_out files, call processing will be triggered after "
-             "all individual files are processed."
-    )
-    parser.add_argument(
-        "--cp_llm_model_id",
-        type=str,
-        default=None, # Optional
-        help="LLM model identifier to be used by call_processor.py for combined call summaries. "
-             "Example: 'NousResearch/Hermes-2-Pro-Llama-3-8B'"
-    )
+    input_group.add_argument("--input_dir", type=str, help="Path to a directory of input audio files or call folders.")
+    parser.add_argument("--output_dir", type=str, required=True, help="Path to the output directory for workflow results.")
+    parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level.")
+    parser.add_argument("--cp_llm_model_id", type=str, default=None, help="LLM model ID for call_processor.")
+    parser.add_argument("--final_call_output_dir", type=str, default=None, help="(Deprecated) Final output directory for processed calls.")
+    parser.add_argument("--enable_clap_separation", action="store_true", help="Enable CLAP-based call segmentation after annotation. If set, audio will be segmented using CLAP annotations (e.g., telephone ringing/hang-up) and each segment will be processed as a separate call.")
+    parser.add_argument("--num_speakers", type=int, default=None, help="Hard number of speakers for diarization. If set, overrides workflow config and disables automatic detection.")
 
     args = parser.parse_args()
 
@@ -443,16 +503,109 @@ def main():
     all_workflows_succeeded = True
     processed_count = 0
 
-    for audio_file_str in files_to_process:
+    if args.enable_clap_separation:
+        print("[INFO] CLAP-based call segmentation is ENABLED. After annotation, audio will be segmented and each segment processed as a call.")
+        # --- CLAP-based segmentation logic ---
+        # 1. Locate the annotation output (e.g., 00_clap_event_annotation/annotations.json)
+        # 2. Locate the normalized audio (e.g., 01_audio_preprocessing/yourfile_normalized.wav)
+        # 3. Segment and output to 06_clap_separation/calls/
+        # 4. Add segments to files_to_process
+        for audio_file_str in list(files_to_process):
+            audio_file = Path(audio_file_str)
+            # Find the workflow run directory for this file (if it exists)
+            workflow_run_dirs = list(Path(args.output_dir).glob(f"*{audio_file.stem}*"))
+            if not workflow_run_dirs:
+                logger.warning(f"No workflow run directory found for {audio_file.name} in {args.output_dir}")
+                continue
+            workflow_run_dir = workflow_run_dirs[0]
+            clap_dir = workflow_run_dir / "00_clap_event_annotation"
+            norm_dir = workflow_run_dir / "01_audio_preprocessing"
+            # Find annotation JSON and normalized audio
+            clap_json = None
+            for f in clap_dir.glob("*.json"):
+                if "instrumental" in f.name.lower():
+                    clap_json = f
+                    break
+            if not clap_json:
+                logger.warning(f"No CLAP annotation JSON found in {clap_dir}")
+                continue
+            norm_audio = None
+            for f in norm_dir.glob("*normalized*.wav"):
+                norm_audio = f
+                break
+            if not norm_audio:
+                logger.warning(f"No normalized audio found in {norm_dir}")
+                continue
+            # Output dir for segments
+            seg_dir = workflow_run_dir / "06_clap_separation" / "calls"
+            segments = segment_audio_by_clap_annotations(norm_audio, clap_json, seg_dir)
+            files_to_process.extend(segments)
+    else:
+        print("[INFO] CLAP-based call segmentation is DISABLED.")
+
+    metadata_map = {}
+    for i, audio_file_str in enumerate(files_to_process):
         processed_count += 1
-        logger.info(f"--- Processing file {processed_count}/{len(files_to_process)}: {audio_file_str} ---")
+        audio_file = Path(audio_file_str)
+        logger.info(f"--- Processing file {processed_count}/{len(files_to_process)}: {audio_file} ---")
+        meta = extract_audio_metadata(audio_file)
+        meta_path = audio_file.with_suffix('.metadata.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+        metadata_map[str(audio_file)] = meta
+        logger.info(f"Extracted metadata for {audio_file.name}: {meta}")
+        # Apollo restoration logic
+        run_apollo = False
+        if meta.get('format', '').lower() == 'mp3':
+            br = meta.get('bitrate', 0)
+            ch = meta.get('channels', 0)
+            if (br <= 96 and ch == 2) or (br <= 64 and ch == 1):
+                run_apollo = True
+        if run_apollo:
+            logger.info(f"Running Apollo restoration for {audio_file.name} (bitrate={meta.get('bitrate')}kbps, channels={meta.get('channels')})")
+            apollo_out = audio_file.with_name(audio_file.stem + '_apollo_restored.wav')
+            apollo_cmd = [
+                'python', 'Apollo/inference.py',
+                '--in_wav', str(audio_file),
+                '--out_wav', str(apollo_out)
+            ]
+            subprocess.run(apollo_cmd, check=False)
+            if apollo_out.exists():
+                files_to_process[i] = str(apollo_out)
+                meta['apollo_restored'] = True
+                logger.info(f"Apollo restoration complete: {apollo_out}")
+            else:
+                logger.warning(f"Apollo restoration failed for {audio_file.name}")
+        else:
+            meta['apollo_restored'] = False
+        # Update metadata file
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+        # If --num_speakers is set, override the diarization stage config before running the workflow
+        if args.num_speakers is not None:
+            # Load the workflow config file
+            with open(args.config_file, 'r') as f:
+                workflow_config = json.load(f)
+            # Find the diarization stage and override num_speakers
+            for stage in workflow_config.get('stages', []):
+                if stage.get('stage_name', '').lower() == 'speaker_diarization':
+                    if 'config' not in stage:
+                        stage['config'] = {}
+                    stage['config']['num_speakers'] = args.num_speakers
+            # Save the modified workflow config to a temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.json') as tmpf:
+                json.dump(workflow_config, tmpf, indent=2)
+                tmp_config_path = tmpf.name
+            args.config_file = tmp_config_path
+            logger.info(f"Overriding diarization num_speakers to {args.num_speakers} via CLI. Using temp config: {tmp_config_path}")
         success = execute_workflow(args.config_file, audio_file_str, args.output_dir, args.log_level)
         if not success:
             all_workflows_succeeded = False
-            logger.error(f"Workflow execution failed for: {audio_file_str}")
+            logger.error(f"Workflow execution failed for: {audio_file}")
             # Decide if we should continue with other files or stop.
             # For now, continue processing other files.
-        logger.info(f"--- Finished processing file: {audio_file_str} ---")
+        logger.info(f"--- Finished processing file: {audio_file} ---")
 
     logger.info(f"All individual file workflow executions complete. Overall success: {all_workflows_succeeded}")
 

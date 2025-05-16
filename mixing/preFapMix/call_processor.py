@@ -759,7 +759,11 @@ Objective and clear."""
         logger.warning(f"[{call_id}] Merged transcript not found or not specified. Skipping LLM processing (name, synopsis, hashtags).")
 
     # --- Final Output Generation (Flatter Structure) ---
-    final_output_dir_base_path = config.get("final_output_dir_path")
+    # Always use '05_final_output' as the final output directory inside the main output directory
+    main_output_dir = call_output_base_dir
+    final_output_dir_base_path = main_output_dir / '05_final_output'
+    final_output_dir_base_path.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[{call_id}] Using fixed final output directory: {final_output_dir_base_path}")
     if final_output_dir_base_path:
         # First list all available files for debugging
         logger.debug(f"[{call_id}] Available files in main output directory before final output generation:")

@@ -2,20 +2,55 @@
 
 ## Current Overall Goal
 
-Finalize all core audio processing and output generation features, including robust LLM-based naming, MP3 compression for individual calls, and implement the `show_compiler.py` script for creating aggregated "show files" from processed paired calls. Ensure robust PII safety and deliver user-friendly, organized outputs as defined in `projectbrief.md` and `productContext.md`.
+Finalize all core audio processing and output generation features, including robust, extensible LLM-based outputs, MP3 compression for individual calls, and implement the `show_compiler.py` script for creating aggregated "show files" from processed paired calls. Ensure robust PII safety and deliver user-friendly, organized outputs as defined in `projectbrief.md` and `productContext.md`.
+
+## Major New Features (May 2025)
+
+- **Stage 0 Metadata Harvesting:**
+  - Every input file is analyzed for bitrate, channels, sample rate, codec, duration, and format using ffprobe or similar.
+  - Metadata is saved as a JSON file alongside the input and propagated through the pipeline, updated at each stage.
+- **Automatic Apollo Restoration:**
+  - If an input is MP3 and (≤96kbps stereo or ≤64kbps mono), Apollo restoration is run before the main pipeline.
+  - Restoration status is tracked in metadata and output tags.
+- **Rich Output Tagging:**
+  - All final outputs (MP3s, soundbites, etc.) include:
+    - ID3 tags: title, categories (TXXX:Categories), genre (TCON), Apollo flag (TXXX:ApolloRestored), full lineage (TXXX:Lineage), and synopsis/comment (COMM).
+    - Sidecar JSON: all metadata, including processing lineage and Apollo status.
+  - LLM-generated categories/tags are embedded in ID3 for easy sorting/organization.
+- **Soundbite Lineage:**
+  - Each soundbite output includes source file, start/end timestamps, transcript, speaker label, and Apollo flag in tags/sidecar.
+  - Speaker labels are flexible (not limited to S0–S7); log warning if >8 speakers.
+- **Future-Proofing:**
+  - System is ready for show-level LLM synopses and show compiler integration.
+  - Documentation and README will be updated to reflect all new features and tagging conventions.
+- **Extensible LLM Task System:**
+  - The LLM stage in the workflow config now supports an arbitrary list of LLM tasks (prompt, output file, etc.), not just name/synopsis/categories.
+  - Users can add new LLM-powered utilities (e.g., image prompts, songs, custom summaries) by editing the workflow JSON.
+  - This system is designed for future UI exposure, empowering users to define new LLM tasks without code changes.
+  - Backward compatibility: old configs with a single prompt are auto-converted internally.
+- **CLAP Annotation Refactor:**
+  - CLAP annotation will now always run on the original, unsegmented audio file (not on pre-processed or split audio).
+  - Plan to refactor and integrate the CLAP annotation logic directly into the main project (as `clap_annotator.py`), removing the dependency on `v3.8/ClapAnnotator`.
+  - The pipeline will use a single, well-structured CLAP annotation JSON for all downstream segmentation and analysis.
 
 ## Current Focus & Immediate Tasks
 
-1.  **LLM Model Update:**
+1.  **LLM Model & Extensibility:**
     *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
-    *   All LLM outputs (call name, synopsis, hashtags) are always generated for every call/audio, with clear error reporting if LLM fails.
-2.  **Final Output Naming:**
-    *   The LLM-generated call name is now robustly used for the final output directory (quotes stripped, sanitized, fallback to call_id with clear logging).
+    *   All LLM outputs (call name, synopsis, categories, and any user-defined tasks) are generated for every call/audio, with clear error reporting if LLM fails.
+    *   LLM tag output is now a comma-separated list of plain English categories (not hashtags), as per new prompt.
+    *   The LLM task system is now fully extensible and user-driven.
+2.  **Final Output Directory:**
+    *   The final output is now always written to `05_final_output/` in the main output directory, no user config needed.
+    *   The LLM-generated call name is robustly used for the final output directory (quotes stripped, sanitized, fallback to call_id with clear logging).
     *   README and CLI now document `--input_file` for single-file workflows, and `--input_dir` for batch.
 3.  **MP3 Compression:**
     *   MP3 compression for main audio is implemented; decision on soundbites pending.
 4.  **Show Compiler:**
-    *   Next focus: verify end-to-end output naming, then implement and test `show_compiler.py` for show-level aggregation.
+    *   Next focus: test and validate the new LLM task system, then implement and test `show_compiler.py` for show-level aggregation.
+5.  **CLAP-Based Call Segmentation (Planned):**
+    *   Design and implement rules-based segmentation using the new CLAP annotation output, with rules defined in the workflow config.
+    *   Refactor pipeline to use the new integrated `clap_annotator.py`.
 
 ## Recent Changes & Discoveries
 
@@ -25,14 +60,19 @@ Finalize all core audio processing and output generation features, including rob
     *   Logging improved for debugging naming issues.
 *   **Documentation:**
     *   README and CLI usage updated for clarity and modern workflow.
+    *   LLM extensibility and prompt templating now documented.
+    *   CLAP annotation and segmentation refactor planned.
 
-## Next Steps (Sequential)
+## Next Steps
 
-1.  Verify that the LLM-generated name is always used for the final output directory when possible.
-2.  Implement and test `show_compiler.py` for show-level audio and transcript aggregation.
-3.  Decide and implement if soundbites in the "final output" directories also require MP3 compression.
-4.  Conduct thorough end-to-end testing of the complete workflow from `workflow_executor.py` through `call_processor.py` to `show_compiler.py`.
-5.  Update all memory bank files to reflect these final additions and the overall completed state of this feature set.
+- Refactor and integrate CLAP annotation logic into the main project.
+- Implement rules-based segmentation using the new CLAP annotation output.
+- Test and validate the new LLM task system with a real workflow run.
+- Plan and begin UI integration for LLM task management.
+- Propagate and update metadata through all pipeline stages.
+- Implement and test ID3/JSON tagging for all outputs and soundbites.
+- Update documentation and README.
+- Begin work on show-level LLM synopses and show compiler integration.
 
 ## Active Decisions & Considerations
 

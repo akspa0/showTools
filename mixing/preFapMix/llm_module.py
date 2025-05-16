@@ -147,149 +147,79 @@ def _format_clap_events_for_prompt(clap_events_data):
         
     return "Detected Sound Events:\n" + "\n".join(formatted_events)
 
-def run_llm_summary(
-    transcript_file_path: str, 
-    clap_events_file_path: str, 
-    diarization_file_path: str, # Kept for signature consistency, may be used later
-    output_dir_str: str, 
-    pii_safe_file_prefix: str = None, # Added to match executor call, marked as unused for now
-    config: dict = None
-):
+def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=None, **kwargs):
     """
-    Performs LLM-based summarization and analysis using a local LM Studio instance.
-    pii_safe_file_prefix is passed from the workflow executor but not currently used by this function.
+    Flexible LLM task runner. For each task in config['llm_tasks'], renders the prompt_template with transcript/context,
+    sends to the LLM, and saves the response to the specified output_file. Supports arbitrary LLM-powered utilities.
+    Accepts output_dir or output_dir_str for compatibility with workflow_executor.py.
     """
-    if config is None:
-        config = {}
-
-    output_dir = Path(output_dir_str)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"[LLM Summary] Running LLM summary/analysis via LM Studio.")
-    logger.info(f"[LLM Summary] Transcript: {transcript_file_path}")
-    logger.info(f"[LLM Summary] CLAP Events: {clap_events_file_path}")
-    logger.info(f"[LLM Summary] Diarization: {diarization_file_path}")
-    logger.info(f"[LLM Summary] Config: {config}")
-    logger.info(f"[LLM Summary] Output directory: {output_dir}")
-
-    # LM Studio Model Identifier from config
-    lm_studio_model_identifier = config.get('lm_studio_model_identifier', 'NousResearch/Hermes-2-Pro-Llama-3-8B') 
-    # LM Studio Base URL from config
-    lm_studio_base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
-    lm_studio_api_key = config.get('lm_studio_api_key', 'lm-studio') # Often 'lm-studio' or can be empty
-
-    logger.info(f"[LLM Summary] Attempting to use LM Studio model: {lm_studio_model_identifier} via {lm_studio_base_url}")
-
-    # Load and format transcript
-    transcript_prompt_text = "Could not load transcript."
-    if transcript_file_path and Path(transcript_file_path).exists():
-        try:
-            with open(transcript_file_path, 'r', encoding='utf-8') as f_trans:
-                # Directly read the content of the .txt file
-                transcript_prompt_text = f_trans.read()
-                if not transcript_prompt_text.strip(): # Check if file is empty or only whitespace
-                    transcript_prompt_text = "Transcript file was found but is empty."
-                    logger.warning(f"[LLM Summary] Transcript file {transcript_file_path} is empty.")
-                else:
-                    logger.info(f"[LLM Summary] Successfully loaded transcript text from {transcript_file_path}.")
-        except Exception as e_read_trans:
-            transcript_prompt_text = f"Error reading transcript file: {e_read_trans}"
-            logger.error(f"[LLM Summary] Error reading transcript file {transcript_file_path}: {e_read_trans}")
-    else:
-        logger.warning(f"[LLM Summary] Transcript file not found or not provided: {transcript_file_path}")
-        transcript_prompt_text = "Transcript file path was not provided or the file does not exist." # More specific message
-
-    # Load and format CLAP events
-    clap_events_prompt_text = "No CLAP events information available."
-    if clap_events_file_path and Path(clap_events_file_path).exists():
-        try:
-            with open(clap_events_file_path, 'r', encoding='utf-8') as f_clap:
-                clap_data = json.load(f_clap)
-                clap_events_prompt_text = _format_clap_events_for_prompt(clap_data)
-        except Exception as e_read_clap:
-            clap_events_prompt_text = f"Error reading or parsing CLAP events: {e_read_clap}"
-            logger.error(f"[LLM Summary] Error reading CLAP events file {clap_events_file_path}: {e_read_clap}")
-    else:
-        logger.warning(f"[LLM Summary] CLAP events file not found or not provided: {clap_events_file_path}")
-
-    # Construct Prompt
-    prompt = f"""
-You are an AI assistant. Your task is to provide a concise summary of the following conversation transcript.
-Incorporate information about notable sound events if they provide relevant context.
-
-Conversation Transcript:
----
-{transcript_prompt_text}
----
-
-Notable Sound Events Information:
----
-{clap_events_prompt_text}
----
-
-Please generate a summary of the conversation:
-"""
+    import os
+    import logging
+    logger = logging.getLogger("llm_module")
+    from openai import OpenAI
     
-    summary_content = "LLM Summarization via LM Studio failed."
-    final_summary_file_path = output_dir / "final_analysis_summary.txt"
+    # Resolve output directory
+    if output_dir is None and output_dir_str is not None:
+        output_dir = Path(output_dir_str)
+    elif output_dir is not None:
+        output_dir = Path(output_dir)
+    else:
+        raise ValueError("run_llm_tasks: Must provide output_dir or output_dir_str.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[LLM Tasks] Using output directory: {output_dir}")
+    
+    # Load transcript
+    with open(transcript_file_path, 'r', encoding='utf-8') as f:
+        transcript = f.read()
+    
+    llm_tasks = config.get('llm_tasks', [])
+    if not llm_tasks:
+        logger.warning("No llm_tasks defined in config; nothing to do.")
+        return
+    
+    lm_studio_base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+    lm_studio_api_key = config.get('lm_studio_api_key', 'lm-studio')
+    model_id = config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+    temperature = config.get('lm_studio_temperature', 0.5)
+    max_tokens = config.get('lm_studio_max_tokens', 250)
+    
+    client = OpenAI(base_url=lm_studio_base_url, api_key=lm_studio_api_key)
+    
+    for task in llm_tasks:
+        name = task.get('name', 'unnamed_task')
+        prompt_template = task.get('prompt_template', '')
+        output_file = task.get('output_file', f'{name}.txt')
+        prompt = prompt_template.format(transcript=transcript)
+        logger.info(f"[LLM Task: {name}] Sending prompt to model {model_id}...")
+        try:
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            result = response.choices[0].message.content.strip()
+            out_path = os.path.join(output_dir, output_file)
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(result)
+            logger.info(f"[LLM Task: {name}] Output written to {out_path}")
+        except Exception as e:
+            logger.error(f"[LLM Task: {name}] LLM request failed: {e}")
 
-    try:
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing OpenAI client for LM Studio: {lm_studio_base_url}")
-        
-        client = OpenAI(
-            base_url=lm_studio_base_url,
-            api_key=lm_studio_api_key, # api_key is often not strictly required by LM Studio but good to include
-        )
-        
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] OpenAI client initialized for LM Studio.")
-        
-        # The prompt is already constructed above
-        # Configurable parameters for the chat completion, e.g., temperature, max_tokens
-        temperature = config.get('lm_studio_temperature', 0.7)
-        max_tokens = config.get('lm_studio_max_tokens', 500)
-        # System prompt can also be made configurable
-        system_prompt_content = config.get('llm_system_prompt', "You are an AI assistant. Your task is to provide a concise summary of the conversation transcript. Incorporate information about notable sound events if they provide relevant context.")
+# Backward compatibility: alias run_llm_summary to run_llm_tasks with a single-task list if needed
 
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Sending request to LM Studio model: {lm_studio_model_identifier}. Temp: {temperature}, MaxTokens: {max_tokens}")
-        
-        completion = client.chat.completions.create(
-            model=lm_studio_model_identifier,
-            messages=[
-                {"role": "system", "content": system_prompt_content},
-                {"role": "user", "content": prompt} # 'prompt' contains the main user-facing prompt and data
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        
-        if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
-            summary_content = completion.choices[0].message.content.strip()
-            logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Summary received successfully from LM Studio.")
-        else:
-            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Unexpected response structure from LM Studio: {completion}")
-            summary_content = "LLM Summarization failed due to unexpected response structure."
-
-    except lms.LMStudioAPIError as e: # Catching specific lmstudio errors if they still can occur through OpenAI client or underlying http
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio API Error: {e}")
-        summary_content = f"LLM Summarization failed due to LM Studio API Error: {e}"
-    except Exception as e: # General catch-all for other errors like httpx.ConnectError
-        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LM Studio Client Error:\\n    {e}")
-        summary_content = f"LLM Summarization failed due to Client Error: {e}"
-        # More detailed error logging for connection issues
-        if "All connection attempts failed" in str(e) or "Connection refused" in str(e):
-            logger.error(f"    Is LM Studio running and accessible at {lm_studio_base_url}?.")
-
-    try:
-        with open(final_summary_file_path, 'w', encoding='utf-8') as f_sum:
-            f_sum.write(summary_content)
-        logger.info(f"[LLM Summary] Summary saved to: {final_summary_file_path}")
-        if "failed" in summary_content.lower() or "error" in summary_content.lower() or "ensure lm studio is running" in summary_content.lower():
-             return {"summary_text_file_path": str(final_summary_file_path), "analysis_complete": False, "error": summary_content}
-        return {"summary_text_file_path": str(final_summary_file_path), "analysis_complete": True}
-        
-    except Exception as e_write:
-        logger.error(f"[LLM Summary] Failed to write summary file: {e_write}")
-        return {"error": f"Failed to write summary file: {e_write}", "summary_text_file_path": None, "analysis_complete": False} 
+def run_llm_summary(transcript_file_path, config, output_dir, **kwargs):
+    """
+    Backward-compatible wrapper for old workflow configs. Converts old prompt to a single-task list.
+    """
+    if 'llm_system_prompt' in config:
+        config = config.copy()
+        config['llm_tasks'] = [{
+            'name': 'llm_summary',
+            'prompt_template': config['llm_system_prompt'] + '\nTranscript:\n{transcript}',
+            'output_file': 'llm_summary.txt'
+        }]
+    return run_llm_tasks(transcript_file_path, config, output_dir, **kwargs)
 
 def generate_llm_summary(
     transcript_json_path: Path, 
