@@ -269,7 +269,13 @@ def _copy_soundbite_directories(
     for speaker_dir in transcription_stage_dir.iterdir():
         if speaker_dir.is_dir() and SPEAKER_DIR_PATTERN.match(speaker_dir.name):
             source_speaker_dir_path = speaker_dir
-            dest_speaker_dir_name = f"{stream_prefix}_{speaker_dir.name}"
+            # Use speaker directory name directly without prefixing with stream type
+            # unless it's for a known stream type (RECV or TRANS)
+            if stream_prefix in ["RECV", "TRANS"]:
+                dest_speaker_dir_name = f"{stream_prefix}_{speaker_dir.name}"
+            else:
+                dest_speaker_dir_name = speaker_dir.name  # Use S0, S1 etc. directly
+            
             dest_speaker_dir_path = call_output_dir / dest_speaker_dir_name
             
             try:
@@ -382,11 +388,55 @@ def _convert_json_transcript_to_plain_text(json_transcript_path: Path, output_tx
             plain_text_lines.append("Transcript content not in expected format.")
 
         with open(output_txt_path, 'w', encoding='utf-8') as f_txt:
-            f_txt.write("\\n".join(plain_text_lines))
+            f_txt.write("\n".join(plain_text_lines))
         logger.info(f"[{call_id_for_logging}] Converted JSON transcript to plain text: {output_txt_path}")
         return True
     except Exception as e:
         logger.error(f"[{call_id_for_logging}] Failed to convert JSON transcript to plain text: {e}", exc_info=True)
+        return False
+
+
+def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path, call_id_for_logging: str) -> bool:
+    """
+    Converts a WAV file to MP3 format using ffmpeg.
+    
+    Args:
+        wav_path: Path to the source WAV file
+        mp3_path: Path where the MP3 file will be created
+        call_id_for_logging: Call ID for logging purposes
+        
+    Returns:
+        bool: True if conversion was successful, False otherwise
+    """
+    if not wav_path.exists():
+        logger.error(f"[{call_id_for_logging}] Source WAV file not found for MP3 conversion: '{wav_path}'")
+        return False
+
+    ffmpeg_cmd = [
+        'ffmpeg',
+        '-y',  # Overwrite output files without asking
+        '-i', str(wav_path),
+        '-codec:a', 'libmp3lame',
+        '-qscale:a', '2',  # VBR quality setting (0-9, 0 = best, 9 = worst)
+        str(mp3_path)
+    ]
+
+    logger.debug(f"[{call_id_for_logging}] Executing ffmpeg command for MP3 conversion: {' '.join(ffmpeg_cmd)}")
+    try:
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+        if process.returncode == 0:
+            logger.info(f"[{call_id_for_logging}] Successfully converted WAV to MP3: '{mp3_path}'.")
+            return True
+        else:
+            logger.error(f"[{call_id_for_logging}] ffmpeg MP3 conversion failed for '{mp3_path}'. Return code: {process.returncode}")
+            logger.error(f"[{call_id_for_logging}] ffmpeg stderr: {process.stderr}")
+            logger.error(f"[{call_id_for_logging}] ffmpeg stdout: {process.stdout}")
+            return False
+    except FileNotFoundError:
+        logger.error(f"[{call_id_for_logging}] ffmpeg command not found. Please ensure ffmpeg is installed and in your PATH.")
+        return False
+    except Exception as e:
+        logger.error(f"[{call_id_for_logging}] An unexpected error occurred during ffmpeg MP3 conversion for '{mp3_path}': {e}")
         return False
 
 
@@ -400,6 +450,15 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
     """
     logger.info(f"[{call_id}] Starting processing for call.")
     
+    # Determine if this is actually a call or just a regular audio file
+    is_regular_audio = False
+    if job_details["type"].startswith("single_"):
+        # Check if this contains any 'call' indicators - if not, treat as regular audio
+        input_name = job_details.get("run_dir", Path("unknown")).name.lower()
+        if not ("call_" in input_name or "recv_" in input_name or "trans_" in input_name):
+            logger.info(f"[{call_id}] This appears to be a regular audio file (not a call): {input_name}")
+            is_regular_audio = True
+    
     call_output_dir = output_call_base_dir / call_id
     call_output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"[{call_id}] Output directory: {call_output_dir}")
@@ -412,8 +471,19 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
     recv_summary_path = None
     trans_summary_path = None
     
-    llm_model_id = config.get("llm_model_id")
-    llm_config_base = {"llm_model_id": llm_model_id} if llm_model_id else {}
+    # Initialize LLM configuration for all three LLM calls
+    llm_model_id = config.get("llm_studio_model_identifier")
+    if not llm_model_id:
+        # Use a default model if not provided
+        llm_model_id = "NousResearch/Hermes-2-Pro-Llama-3-8B"
+        logger.warning(f"[{call_id}] No LLM model ID provided in config. Using default model: {llm_model_id}")
+    llm_config_base = {
+        "lm_studio_model_identifier": llm_model_id,
+        "lm_studio_base_url": config.get("lm_studio_base_url", "http://localhost:1234/v1"),
+        "lm_studio_api_key": config.get("lm_studio_api_key", "lm-studio"),
+        "temperature": config.get("temperature", 0.7),
+        "max_response_tokens": config.get("max_response_tokens", 1024)
+    }
 
 
     if job_details["type"] == "pair":
@@ -456,7 +526,12 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
     elif job_details["type"].startswith("single"):
         run_dir = job_details["run_dir"]
         stream_type = job_details["type"].replace("single_", "") # recv, trans, or unknown
-        logger.info(f"[{call_id}] Processing as SINGLE ({stream_type}). DIR: {run_dir.name}")
+        
+        # If this is a regular audio file (not a call), use a generic description
+        if is_regular_audio:
+            stream_type = "audio" # Use a neutral stream type for non-call files
+        
+        logger.info(f"[{call_id}] Processing as {job_details['type'].upper()}. DIR: {run_dir.name}")
         
         vocal_stem_path = _find_output_file(run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
         transcript_path = _find_output_file(run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
@@ -477,7 +552,9 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         if summary_path:
             shutil.copy2(summary_path, call_output_dir / f"{call_id}_{stream_type}_stream_summary.txt")
         
-        _copy_soundbite_directories(run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, stream_type.upper(), call_id)
+        # For non-call audio, use a more appropriate prefix than "RECV_" or "TRANS_"
+        speaker_prefix = "SPEAKER_" if is_regular_audio else stream_type.upper()
+        _copy_soundbite_directories(run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, speaker_prefix, call_id)
     
     else:
         logger.error(f"[{call_id}] Unknown job type: {job_details['type']}. Skipping.")
@@ -485,67 +562,189 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
 
     # LLM Processing (Call Name, Synopsis, Hashtags)
     # This section will run if merged_transcript_path is set (either from a pair or a single)
-    if merged_transcript_path and merged_transcript_path.exists() and llm_model_id:
+    if merged_transcript_path and merged_transcript_path.exists():
         logger.info(f"[{call_id}] Starting LLM processing using transcript: {merged_transcript_path}")
+        logger.debug(f"[{call_id}] LLM configuration: {llm_config_base}")
 
-        # 1. Generate Call Name
-        call_name_system_prompt = "Generate a witty, PII-safe call title under 10 words, with no punctuation. Capture conversational absurdity. Output title only."
-        call_name_output_filename = f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
-        logger.info(f"[{call_id}] Generating suggested call name...")
-        generated_call_name_path = generate_llm_summary(
-            transcript_json_path=merged_transcript_path,
-            system_prompt=call_name_system_prompt,
-            llm_config=llm_config_base,
-            output_dir=call_output_dir,
-            output_filename=call_name_output_filename
-        )
-        if generated_call_name_path and generated_call_name_path.exists():
-            try:
-                with open(generated_call_name_path, 'r', encoding='utf-8') as f_name:
-                    suggested_call_name = f_name.read().strip()
-                logger.info(f"[{call_id}] Suggested call name: {suggested_call_name}")
-            except Exception as e:
-                logger.error(f"[{call_id}] Could not read generated call name from {generated_call_name_path}: {e}")
+        # Verify if we have a plain text transcript or need to convert JSON to text
+        transcript_for_llm = merged_transcript_path
+        if merged_transcript_path.suffix.lower() == '.json':
+            # For JSON transcripts, create a plain text version for LLM processing
+            plain_text_path = call_output_dir / f"{call_id}_transcript_for_llm.txt"
+            logger.info(f"[{call_id}] Converting JSON transcript to plain text for LLM processing: {plain_text_path}")
+            if _convert_json_transcript_to_plain_text(merged_transcript_path, plain_text_path, call_id):
+                transcript_for_llm = plain_text_path
+            else:
+                logger.warning(f"[{call_id}] Could not convert JSON transcript to plain text. Using JSON file directly.")
+
+        # Adjust prompts based on whether this is a call or regular audio
+        call_name_system_prompt = ""
+        call_synopsis_system_prompt = ""
+        hashtag_categories_system_prompt = ""
+        
+        if is_regular_audio:
+            # For regular audio (non-call), use more generic prompts
+            call_name_system_prompt = "Generate a descriptive title for this audio file in under 10 words. Output title only."
+            call_synopsis_system_prompt = """Create a concise summary of the audio content covering:
+1. Main themes or topics
+2. Key points
+3. Overall tone or sentiment
+Be objective and clear."""
+            hashtag_categories_system_prompt = """Provide 3-5 hashtag categories summarizing this audio file's main themes and content.
+- Each tag must be a single word or a short_compound_phrase (use underscores).
+- Start each tag with '#'.
+- Separate tags with spaces.
+- Example: #MusicReview #ProductAnnouncement #TechnicalTutorial
+- Output only the space-separated hashtags."""
         else:
-            logger.warning(f"[{call_id}] Could not generate or find call name file: {generated_call_name_path}")
-
-        # 2. Generate Call Synopsis
-        call_synopsis_system_prompt = """Create a PII-safe call synopsis:
+            # For actual calls, use the original call-specific prompts
+            call_name_system_prompt = "Generate a witty, PII-safe call title under 10 words, with no punctuation. Capture conversational absurdity. Output title only."
+            call_synopsis_system_prompt = """Create a PII-safe call synopsis:
 1. Main reason for call.
 2. Key topics.
 3. Decisions/outcomes.
 4. Action items (and responsible parties, if any).
 Objective and clear."""
-        combined_summary_filename_actual = f"{call_id}_{COMBINED_SUMMARY_FILENAME}"
-        logger.info(f"[{call_id}] Generating combined call synopsis...")
-        generated_synopsis_path = generate_llm_summary(
-            transcript_json_path=merged_transcript_path,
-            system_prompt=call_synopsis_system_prompt,
-            llm_config=llm_config_base,
-            output_dir=call_output_dir,
-            output_filename=combined_summary_filename_actual
-        )
-        if generated_synopsis_path and generated_synopsis_path.exists():
-            logger.info(f"[{call_id}] Combined call synopsis generated at: {generated_synopsis_path}")
-        else:
-            logger.warning(f"[{call_id}] Failed to generate combined call synopsis: {generated_synopsis_path}")
-
-        # 3. Generate Hashtag Categories
-        hashtag_categories_system_prompt = """Analyze the transcript. Provide a list of 3-5 hashtag categories summarizing the call's main subjects and themes.
+            hashtag_categories_system_prompt = """Analyze the transcript. Provide a list of 3-5 hashtag categories summarizing the call's main subjects and themes.
 - Each tag must be a single word or a short_compound_phrase (use underscores).
 - Start each tag with '#'.
 - Separate tags with spaces.
 - Example: #OrderInquiry #ProductDefect #RefundRequest
 - Output only the space-separated hashtags."""
+
+        # 1. Generate Content Name/Title
+        call_name_output_filename = f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
+        logger.info(f"[{call_id}] Generating content name using transcript: {transcript_for_llm}")
+        logger.debug(f"[{call_id}] CONTENT NAME - System prompt: {call_name_system_prompt}")
+        logger.debug(f"[{call_id}] CONTENT NAME - Output filename: {call_name_output_filename}")
+        logger.debug(f"[{call_id}] CONTENT NAME - Output dir: {call_output_dir}")
+        
+        # Make a deep copy of the config to prevent any chance of cross-talk between requests
+        name_llm_config = {key: value for key, value in llm_config_base.items()}
+        
+        # DIRECT FILE PATH CHECK - Before call name generation
+        expected_call_name_path = call_output_dir / call_name_output_filename
+        if expected_call_name_path.exists():
+            logger.warning(f"[{call_id}] WARNING: Content name file already exists before generation: {expected_call_name_path}")
+            
+        generated_call_name_path = generate_llm_summary(
+            transcript_json_path=transcript_for_llm,  # Use text version when available
+            system_prompt=call_name_system_prompt,
+            llm_config=name_llm_config,
+            output_dir=call_output_dir,
+            output_filename=call_name_output_filename
+        )
+        
+        logger.debug(f"[{call_id}] CONTENT NAME - Result path: {generated_call_name_path}")
+        
+        # DIRECT FILE PATH CHECK - After call name generation
+        if expected_call_name_path.exists():
+            logger.info(f"[{call_id}] VERIFICATION: Content name file exists at expected path: {expected_call_name_path}")
+            try:
+                with open(expected_call_name_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    logger.info(f"[{call_id}] Content name file content: '{content}'")
+            except Exception as e:
+                logger.error(f"[{call_id}] Error reading content name file: {e}")
+        else:
+            logger.error(f"[{call_id}] CRITICAL ERROR: Content name file was NOT created at expected path: {expected_call_name_path}")
+            # List directory contents to see what files were actually created
+            try:
+                logger.info(f"[{call_id}] Directory contents of {call_output_dir}:")
+                for item in call_output_dir.iterdir():
+                    logger.info(f"[{call_id}]  - {item.name} ({item.stat().st_size} bytes)")
+            except Exception as e:
+                logger.error(f"[{call_id}] Error listing directory contents: {e}")
+                
+        if generated_call_name_path and generated_call_name_path.exists():
+            try:
+                with open(generated_call_name_path, 'r', encoding='utf-8') as f_name:
+                    suggested_call_name = f_name.read().strip()
+                logger.info(f"[{call_id}] Generated content name: {suggested_call_name}")
+            except Exception as e:
+                logger.error(f"[{call_id}] Could not read generated content name from {generated_call_name_path}: {e}")
+        else:
+            logger.warning(f"[{call_id}] Could not generate or find content name file: {generated_call_name_path}")
+
+        # 2. Generate Content Synopsis
+        call_synopsis_output_filename = f"{call_id}_{COMBINED_SUMMARY_FILENAME}"
+        logger.info(f"[{call_id}] Generating content synopsis using transcript: {transcript_for_llm}")
+        logger.debug(f"[{call_id}] SYNOPSIS - System prompt: {call_synopsis_system_prompt}")
+        logger.debug(f"[{call_id}] SYNOPSIS - Output filename: {call_synopsis_output_filename}")
+        logger.debug(f"[{call_id}] SYNOPSIS - Output dir: {call_output_dir}")
+        
+        # Make a deep copy of the config
+        synopsis_llm_config = {key: value for key, value in llm_config_base.items()}
+        
+        # DIRECT FILE PATH CHECK - Before synopsis generation
+        expected_synopsis_path = call_output_dir / call_synopsis_output_filename
+        if expected_synopsis_path.exists():
+            logger.warning(f"[{call_id}] WARNING: Synopsis file already exists before generation: {expected_synopsis_path}")
+            
+        generated_synopsis_path = generate_llm_summary(
+            transcript_json_path=transcript_for_llm,  # Use text version when available
+            system_prompt=call_synopsis_system_prompt,
+            llm_config=synopsis_llm_config,
+            output_dir=call_output_dir,
+            output_filename=call_synopsis_output_filename
+        )
+        
+        logger.debug(f"[{call_id}] SYNOPSIS - Result path: {generated_synopsis_path}")
+        
+        # DIRECT FILE PATH CHECK - After synopsis generation
+        if expected_synopsis_path.exists():
+            logger.info(f"[{call_id}] VERIFICATION: Synopsis file exists at expected path: {expected_synopsis_path}")
+            try:
+                with open(expected_synopsis_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()[:100]  # Only read first 100 chars
+                    logger.info(f"[{call_id}] Synopsis file content (first 100 chars): '{content}...'")
+            except Exception as e:
+                logger.error(f"[{call_id}] Error reading synopsis file: {e}")
+        else:
+            logger.error(f"[{call_id}] CRITICAL ERROR: Synopsis file was NOT created at expected path: {expected_synopsis_path}")
+        
+        if generated_synopsis_path and generated_synopsis_path.exists():
+            logger.info(f"[{call_id}] Content synopsis generated at: {generated_synopsis_path}")
+        else:
+            logger.warning(f"[{call_id}] Failed to generate content synopsis: {generated_synopsis_path}")
+
+        # 3. Generate Hashtag Categories
         hashtag_output_filename = f"{call_id}{HASHTAGS_FILENAME_SUFFIX}"
-        logger.info(f"[{call_id}] Generating hashtag categories...")
+        logger.info(f"[{call_id}] Generating hashtag categories using transcript: {transcript_for_llm}")
+        logger.debug(f"[{call_id}] HASHTAGS - System prompt: {hashtag_categories_system_prompt}")
+        logger.debug(f"[{call_id}] HASHTAGS - Output filename: {hashtag_output_filename}")
+        logger.debug(f"[{call_id}] HASHTAGS - Output dir: {call_output_dir}")
+        
+        # Make a deep copy of the config
+        hashtag_llm_config = {key: value for key, value in llm_config_base.items()}
+        
+        # DIRECT FILE PATH CHECK - Before hashtag generation
+        expected_hashtag_path = call_output_dir / hashtag_output_filename
+        if expected_hashtag_path.exists():
+            logger.warning(f"[{call_id}] WARNING: Hashtag file already exists before generation: {expected_hashtag_path}")
+            
         generated_hashtags_path = generate_llm_summary(
-            transcript_json_path=merged_transcript_path,
+            transcript_json_path=transcript_for_llm,  # Use text version when available
             system_prompt=hashtag_categories_system_prompt,
-            llm_config=llm_config_base,
+            llm_config=hashtag_llm_config,
             output_dir=call_output_dir,
             output_filename=hashtag_output_filename
         )
+        
+        logger.debug(f"[{call_id}] HASHTAGS - Result path: {generated_hashtags_path}")
+        
+        # DIRECT FILE PATH CHECK - After hashtag generation
+        if expected_hashtag_path.exists():
+            logger.info(f"[{call_id}] VERIFICATION: Hashtag file exists at expected path: {expected_hashtag_path}")
+            try:
+                with open(expected_hashtag_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    logger.info(f"[{call_id}] Hashtag file content: '{content}'")
+            except Exception as e:
+                logger.error(f"[{call_id}] Error reading hashtag file: {e}")
+        else:
+            logger.error(f"[{call_id}] CRITICAL ERROR: Hashtag file was NOT created at expected path: {expected_hashtag_path}")
+        
         if generated_hashtags_path and generated_hashtags_path.exists():
             try:
                 with open(generated_hashtags_path, 'r', encoding='utf-8') as f_tags:
@@ -557,33 +756,49 @@ Objective and clear."""
             logger.warning(f"[{call_id}] Failed to generate hashtag categories: {generated_hashtags_path}")
     
     elif not (merged_transcript_path and merged_transcript_path.exists()):
-        logger.warning(f"[{call_id}] Merged transcript not found or not specified. Skipping LLM processing (call name, synopsis, hashtags).")
-    elif not llm_model_id:
-        logger.warning(f"[{call_id}] LLM model ID not provided in config. Skipping LLM processing (call name, synopsis, hashtags).")
+        logger.warning(f"[{call_id}] Merged transcript not found or not specified. Skipping LLM processing (name, synopsis, hashtags).")
 
     # --- Final Output Generation (Flatter Structure) ---
     final_output_dir_base_path = config.get("final_output_dir_path")
     if final_output_dir_base_path:
-        suggested_call_name_text = call_id # Fallback to call_id
-        # Attempt to read the suggested call name if available
-        # Note: generated_call_name_path is defined earlier in the LLM processing section
-        if 'generated_call_name_path' in locals() and generated_call_name_path and generated_call_name_path.exists():
-            try:
-                with open(generated_call_name_path, 'r', encoding='utf-8') as f_name:
-                    raw_title = f_name.read().strip()
-                    # Sanitize raw_title for directory/filename use:
-                    # Remove non-alphanumeric (excluding underscore/hyphen), replace spaces with underscore
-                    sanitized_name = re.sub(r'[^\w\s-]', '', raw_title).strip().replace(' ', '_')
-                    # Remove multiple underscores
-                    sanitized_name = re.sub(r'_+', '_', sanitized_name)
-                    if sanitized_name: # Use if not empty after sanitization
-                        suggested_call_name_text = sanitized_name
-            except Exception as e:
-                logger.error(f"[{call_id}] Could not read or sanitize suggested call name for final output dir: {e}")
-        
-        final_call_specific_dir = final_output_dir_base_path / suggested_call_name_text
+        # First list all available files for debugging
+        logger.debug(f"[{call_id}] Available files in main output directory before final output generation:")
         try:
-            final_call_specific_dir.mkdir(parents=True, exist_ok=True)
+            for item in call_output_dir.iterdir():
+                logger.debug(f"[{call_id}]  - {item.name} ({item.stat().st_size} bytes)")
+        except Exception as e:
+            logger.error(f"[{call_id}] Error listing main output directory contents: {e}")
+    
+        suggested_content_name_text = call_id # Fallback to call_id
+        call_name_path = call_output_dir / f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
+        if call_name_path.exists():
+            logger.info(f"[{call_id}] Found content name file: {call_name_path}")
+            try:
+                with open(call_name_path, 'r', encoding='utf-8') as f_name:
+                    raw_title = f_name.read().strip()
+                    logger.info(f"[{call_id}] Raw content name (pre-strip): '{raw_title}'")
+                    # Strip quotes if present
+                    if raw_title.startswith('"') and raw_title.endswith('"'):
+                        raw_title = raw_title[1:-1].strip()
+                        logger.info(f"[{call_id}] Raw content name (stripped quotes): '{raw_title}'")
+                    # Sanitize raw_title for directory/filename use:
+                    sanitized_name = re.sub(r'[^\w\s-]', '', raw_title).strip().replace(' ', '_')
+                    sanitized_name = re.sub(r'_+', '_', sanitized_name)
+                    logger.info(f"[{call_id}] Sanitized content name: '{sanitized_name}'")
+                    if sanitized_name:
+                        suggested_content_name_text = sanitized_name
+                        logger.info(f"[{call_id}] Using sanitized name for final dir: '{suggested_content_name_text}'")
+                    else:
+                        logger.warning(f"[{call_id}] Sanitized content name is empty after processing. Falling back to call_id.")
+            except Exception as e:
+                logger.error(f"[{call_id}] Could not read or sanitize content name for final output dir: {e}")
+        else:
+            logger.warning(f"[{call_id}] Content name file not found at expected path: {call_name_path}. Using call_id as fallback.")
+        
+        final_content_specific_dir = final_output_dir_base_path / suggested_content_name_text
+        try:
+            logger.info(f"[{call_id}] Creating final output directory: {final_content_specific_dir}")
+            final_content_specific_dir.mkdir(parents=True, exist_ok=True)
 
             # 1. Copy/Rename main audio (WAV for now)
             source_audio_for_final = None
@@ -601,42 +816,81 @@ Objective and clear."""
                     source_audio_for_final = single_vocal_in_call_dir
             
             if source_audio_for_final:
-                final_audio_filename = f"{suggested_call_name_text}.wav" # MP3 later
-                shutil.copy2(source_audio_for_final, final_call_specific_dir / final_audio_filename)
-                logger.info(f"[{call_id}] Copied source audio to final output: {final_call_specific_dir / final_audio_filename}")
+                final_audio_filename_wav = f"{suggested_content_name_text}.wav"
+                final_audio_filename_mp3 = f"{suggested_content_name_text}.mp3"
+                final_wav_path = final_content_specific_dir / final_audio_filename_wav
+                final_mp3_path = final_content_specific_dir / final_audio_filename_mp3
+                
+                # First, copy the WAV file to the final directory
+                shutil.copy2(source_audio_for_final, final_wav_path)
+                
+                # Then convert it to MP3
+                if _convert_wav_to_mp3(final_wav_path, final_mp3_path, call_id):
+                    # If MP3 conversion is successful, remove the WAV file
+                    try:
+                        os.remove(final_wav_path)
+                        logger.info(f"[{call_id}] Converted to MP3 and removed original WAV: {final_mp3_path}")
+                    except Exception as e:
+                        logger.warning(f"[{call_id}] Converted to MP3 but failed to remove original WAV ({final_wav_path}): {e}")
+                else:
+                    logger.error(f"[{call_id}] Failed to convert WAV to MP3, keeping original WAV file: {final_wav_path}")
             else:
                 logger.warning(f"[{call_id}] No source audio found to copy to final output directory.")
 
             # 2. Create Plain Text Transcript
             # merged_transcript_path is defined earlier (either merged pair or single stream transcript)
             if 'merged_transcript_path' in locals() and merged_transcript_path and merged_transcript_path.exists():
-                plain_text_transcript_target_path = final_call_specific_dir / "transcript.txt"
+                plain_text_transcript_target_path = final_content_specific_dir / "transcript.txt"
                 _convert_json_transcript_to_plain_text(merged_transcript_path, plain_text_transcript_target_path, call_id)
+                logger.info(f"[{call_id}] Created plain text transcript: {plain_text_transcript_target_path}")
             else:
-                logger.warning(f"[{call_id}] No merged transcript found to convert to plain text for final output.")
+                logger.warning(f"[{call_id}] No transcript found to convert to plain text for final output.")
 
             # 3. Copy Synopsis
-            # generated_synopsis_path is defined earlier
-            if 'generated_synopsis_path' in locals() and generated_synopsis_path and generated_synopsis_path.exists():
-                shutil.copy2(generated_synopsis_path, final_call_specific_dir / "synopsis.txt")
+            synopsis_path = call_output_dir / f"{call_id}_{COMBINED_SUMMARY_FILENAME}"
+            if synopsis_path.exists():
+                shutil.copy2(synopsis_path, final_content_specific_dir / "synopsis.txt")
+                logger.info(f"[{call_id}] Copied synopsis file to final output: {final_content_specific_dir / 'synopsis.txt'}")
             else:
-                logger.warning(f"[{call_id}] No synopsis file found to copy to final output.")
+                logger.warning(f"[{call_id}] No synopsis file found to copy to final output: {synopsis_path}")
 
             # 4. Copy Hashtags
-            # generated_hashtags_path is defined earlier
-            if 'generated_hashtags_path' in locals() and generated_hashtags_path and generated_hashtags_path.exists():
-                shutil.copy2(generated_hashtags_path, final_call_specific_dir / "hashtags.txt")
+            hashtags_path = call_output_dir / f"{call_id}{HASHTAGS_FILENAME_SUFFIX}"
+            if hashtags_path.exists():
+                shutil.copy2(hashtags_path, final_content_specific_dir / "hashtags.txt")
+                logger.info(f"[{call_id}] Copied hashtags file to final output: {final_content_specific_dir / 'hashtags.txt'}")
             else:
-                logger.warning(f"[{call_id}] No hashtags file found to copy to final output.")
+                logger.warning(f"[{call_id}] No hashtags file found to copy to final output: {hashtags_path}")
             
-            # 5. Write call_type.txt (for show_compiler.py to identify pairs)
-            with open(final_call_specific_dir / "call_type.txt", "w", encoding="utf-8") as f_type:
-                f_type.write(job_details["type"]) # e.g., "pair", "single_recv"
+            # 5. Copy Content Name
+            call_name_path = call_output_dir / f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
+            if call_name_path.exists():
+                content_name_output_path = final_content_specific_dir / (
+                    "content_name.txt" if is_regular_audio else "call_name.txt"
+                )
+                shutil.copy2(call_name_path, content_name_output_path)
+                logger.info(f"[{call_id}] Copied content name file to final output: {content_name_output_path}")
+            else:
+                logger.warning(f"[{call_id}] No content name file found to copy to final output: {call_name_path}")
+                
+            # 6. Write type text file (for show_compiler.py to identify pairs)
+            type_filename = "audio_type.txt" if is_regular_audio else "call_type.txt"
+            with open(final_content_specific_dir / type_filename, "w", encoding="utf-8") as f_type:
+                content_type = "regular_audio" if is_regular_audio else job_details["type"]
+                f_type.write(content_type)
             
-            logger.info(f"[{call_id}] Final output structure generated at: {final_call_specific_dir}")
+            logger.info(f"[{call_id}] Final output structure generated at: {final_content_specific_dir}")
+            
+            # List the contents of the final output directory
+            logger.debug(f"[{call_id}] Final output directory contents:")
+            try:
+                for item in final_content_specific_dir.iterdir():
+                    logger.debug(f"[{call_id}]  - {item.name} ({item.stat().st_size} bytes)")
+            except Exception as e:
+                logger.error(f"[{call_id}] Error listing final output directory contents: {e}")
 
         except Exception as e_final_struct:
-            logger.error(f"[{call_id}] Error during final output structure generation for '{suggested_call_name_text}': {e_final_struct}", exc_info=True)
+            logger.error(f"[{call_id}] Error during final output structure generation for '{suggested_content_name_text}': {e_final_struct}", exc_info=True)
     # --- End of Final Output Generation ---
     
     logger.info(f"[{call_id}] Finished processing call.")
@@ -689,23 +943,28 @@ def main():
     # 2. For each call_id (job), process it
     # Placeholder for global config that might be passed to process_call
     processing_config = { 
-        # Example: 'append_tones': True, 
-        #          'mixing_volumes': {'vocals_left': 0.8, 'vocals_right': 0.8},
-        #          'llm_studio_model_identifier': 'NousResearch/Hermes-2-Pro-Llama-3-8B' # Example
+        # Add default configuration here if needed
     }
     if args.llm_model_id:
+        # Store the model ID with the key expected by process_call
         processing_config['llm_studio_model_identifier'] = args.llm_model_id
+        logger.info(f"Using LLM model: {args.llm_model_id}")
+        # Debug: Print the model ID being passed
+        logger.debug(f"LLM model ID set in processing_config: {processing_config['llm_studio_model_identifier']}")
     else:
-        if 'llm_studio_model_identifier' in processing_config: # Check before deleting
-            logger.info("No --llm_model_id provided via CLI. Removing any hardcoded example from processing_config.")
-            del processing_config['llm_studio_model_identifier']
+        logger.info("No LLM model specified. LLM processing will be skipped.")
             
     if args.final_output_dir:
+        # Create the final output directory and ensure it's a Path object
         final_output_path = Path(args.final_output_dir)
         try:
+            logger.info(f"Creating final output directory: {final_output_path}")
             final_output_path.mkdir(parents=True, exist_ok=True)
             processing_config['final_output_dir_path'] = final_output_path
             logger.info(f"Final output (flatter structure) will be saved to: {final_output_path}")
+            # Debug: Print the final output directory type and path
+            logger.debug(f"Final output directory path type: {type(final_output_path)}")
+            logger.debug(f"Final output directory path: {final_output_path}")
         except OSError as e:
             logger.error(f"Error: Could not create final output directory '{final_output_path}': {e}. Final output will be skipped.")
             if 'final_output_dir_path' in processing_config:
@@ -724,9 +983,13 @@ def main():
             
     logger.info("--- Call Processing Summary ---")
     logger.info(f"Total call IDs processed: {len(call_jobs)}")
-    logger.info(f"Successfully processed (placeholder): {successful_calls}")
-    logger.info(f"Failed to process (placeholder): {failed_calls}")
+    logger.info(f"Successfully processed: {successful_calls}")
+    logger.info(f"Failed to process: {failed_calls}")
     logger.info(f"Processed call data saved in: {output_call_path}")
+    if 'final_output_dir_path' in processing_config:
+        logger.info(f"Final output structure saved in: {processing_config['final_output_dir_path']}")
+    else:
+        logger.info("No final output structure was generated.")
 
 
 if __name__ == "__main__":

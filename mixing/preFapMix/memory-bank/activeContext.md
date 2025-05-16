@@ -2,43 +2,35 @@
 
 ## Current Overall Goal
 
-Finalize all core audio processing and output generation features, including MP3 compression for individual calls, and implement the `show_compiler.py` script for creating aggregated "show files" from processed paired calls. Ensure robust PII safety and deliver user-friendly, organized outputs as defined in `projectbrief.md` and `productContext.md`.
+Finalize all core audio processing and output generation features, including robust LLM-based naming, MP3 compression for individual calls, and implement the `show_compiler.py` script for creating aggregated "show files" from processed paired calls. Ensure robust PII safety and deliver user-friendly, organized outputs as defined in `projectbrief.md` and `productContext.md`.
 
 ## Current Focus & Immediate Tasks
 
-1.  **Implement MP3 Compression:** 
-    *   Add a utility function (likely in `call_processor.py` or a shared `utils.py`) to compress WAV files to MP3 using `ffmpeg`.
-    *   Integrate this into `call_processor.py` to convert the primary audio file in the "final output" directory (e.g., `final_processed_calls/[Sanitized_Call_Name]/[Sanitized_Call_Name].wav`) to MP3 format.
-    *   Decide on and implement MP3 compression for soundbites within the "final output" structure (if desired).
-
-2.  **Design and Implement `show_compiler.py`:**
-    *   **Inputs:** The base "final output" directory (e.g., `final_processed_calls/`).
-    *   **Outputs (in a `show_output` directory):** 
-        *   `show_audio.mp3` (concatenated MP3s of paired calls).
-        *   `show_timestamps.txt` (start times and names of calls in the show).
-        *   `show_transcript.txt` (concatenated plain text transcripts).
-    *   **Core Logic:** Filter for "pair" type calls using `call_type.txt`, sort chronologically, use `ffmpeg` for audio concatenation, and generate metadata files.
+1.  **LLM Model Update:**
+    *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
+    *   All LLM outputs (call name, synopsis, hashtags) are always generated for every call/audio, with clear error reporting if LLM fails.
+2.  **Final Output Naming:**
+    *   The LLM-generated call name is now robustly used for the final output directory (quotes stripped, sanitized, fallback to call_id with clear logging).
+    *   README and CLI now document `--input_file` for single-file workflows, and `--input_dir` for batch.
+3.  **MP3 Compression:**
+    *   MP3 compression for main audio is implemented; decision on soundbites pending.
+4.  **Show Compiler:**
+    *   Next focus: verify end-to-end output naming, then implement and test `show_compiler.py` for show-level aggregation.
 
 ## Recent Changes & Discoveries
 
-*   **Advanced LLM Integration in `call_processor.py`:** 
-    *   Successfully implemented three distinct LLM calls (via `llm_module.generate_llm_summary`) for generating call names, synopses, and hashtag categories using approved, concise system prompts.
-    *   Outputs are saved to respective `.txt` files within the primary processed call directory (e.g., `processed_calls/[call_id]/`).
-*   **"Final Output" Structure Initiated in `call_processor.py`:**
-    *   Added `--final_output_dir` argument.
-    *   Creates a flatter, user-friendly directory for each call (e.g., `final_processed_calls/[Sanitized_Call_Name]/`).
-    *   This directory includes:
-        *   The primary call audio as `.wav` (awaiting MP3 compression).
-        *   A plain text `transcript.txt` (converted from JSON).
-        *   Copied `synopsis.txt` and `hashtags.txt`.
-        *   A `call_type.txt` file (e.g., containing "pair" or "single_recv") to aid `show_compiler.py`.
-*   **Previous Blockers Resolved:** Terminal echo issue and initial LLM import/usage issues are considered resolved.
+*   **LLM Model and Output Naming:**
+    *   Model is now `llama-3.1-8b-supernova-etherealhermes`.
+    *   Final output directory naming is robust to LLM output quirks (quotes, empty, etc.).
+    *   Logging improved for debugging naming issues.
+*   **Documentation:**
+    *   README and CLI usage updated for clarity and modern workflow.
 
 ## Next Steps (Sequential)
 
-1.  Implement MP3 compression functionality in `call_processor.py` for the main audio file in the "final output" directories.
-2.  Decide and implement if soundbites in the "final output" directories also require MP3 compression.
-3.  Develop the `show_compiler.py` script with audio concatenation, timestamp generation, and transcript aggregation features.
+1.  Verify that the LLM-generated name is always used for the final output directory when possible.
+2.  Implement and test `show_compiler.py` for show-level audio and transcript aggregation.
+3.  Decide and implement if soundbites in the "final output" directories also require MP3 compression.
 4.  Conduct thorough end-to-end testing of the complete workflow from `workflow_executor.py` through `call_processor.py` to `show_compiler.py`.
 5.  Update all memory bank files to reflect these final additions and the overall completed state of this feature set.
 

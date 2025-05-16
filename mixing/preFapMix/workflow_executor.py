@@ -8,6 +8,8 @@ import shutil
 import re
 import argparse
 import subprocess
+import threading
+import queue
 
 # Global logger for the executor
 logger = logging.getLogger(__name__)
@@ -357,7 +359,7 @@ def main():
     
     # Input can be a single file or a directory
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--input_audio_file", type=str, help="Path to a single input audio file.")
+    input_group.add_argument("--input_file", "--input_audio_file", dest="input_audio_file", type=str, help="Path to a single input audio file.")
     input_group.add_argument("--input_dir", type=str, help="Path to a directory of audio files to process.")
     
     parser.add_argument("--output_dir", type=str, required=True, help="Base directory for workflow run outputs.")
