@@ -10,6 +10,7 @@ from pyannote.database.util import load_rttm # Correct import for RTTM loading
 from pydub import AudioSegment # For slicing
 import tempfile
 import shutil # For cleaning up temp slice dir
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -293,10 +294,10 @@ def run_transcription(
     # --- Validate Inputs ---
     if not vocal_stem_path or not Path(vocal_stem_path).exists():
         logger.error(f"[{pii_safe_file_prefix}] Vocal stem file not found: {vocal_stem_path}")
-        return {"error": "Vocal stem file not found", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        return {"error": "Vocal stem file not found", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
     if not diarization_file_path or not Path(diarization_file_path).exists():
         logger.error(f"[{pii_safe_file_prefix}] Diarization RTTM file not found: {diarization_file_path}")
-        return {"error": "Diarization RTTM file not found", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        return {"error": "Diarization RTTM file not found", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
 
     # --- Load Whisper Model ---
     try:
@@ -306,7 +307,7 @@ def run_transcription(
         whisper_model = whisper_load_model(whisper_model_name, device=device)
     except Exception as e:
         logger.error(f"[{pii_safe_file_prefix}] Failed to load Whisper model '{whisper_model_name}': {e}", exc_info=True)
-        return {"error": f"Failed to load Whisper model: {e}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        return {"error": f"Failed to load Whisper model: {e}", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
 
     # --- Load Diarization (RTTM) ---
     logger.info(f"[{pii_safe_file_prefix}] Loading RTTM: {diarization_file_path}")
@@ -314,16 +315,16 @@ def run_transcription(
         rttm_data = load_rttm(diarization_file_path)
         if not rttm_data:
             logger.error(f"[{pii_safe_file_prefix}] RTTM file loaded empty: {diarization_file_path}")
-            return {"error": "RTTM file loaded empty", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+            return {"error": "RTTM file loaded empty", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
         first_key = list(rttm_data.keys())[0]
         diarization_annotation = rttm_data[first_key]
         if not isinstance(diarization_annotation, Annotation):
             logger.error(f"[{pii_safe_file_prefix}] Invalid data type from RTTM (key: {first_key}): {type(diarization_annotation)}")
-            return {"error": "Invalid data from RTTM", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+            return {"error": "Invalid data from RTTM", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
         logger.info(f"[{pii_safe_file_prefix}] RTTM loaded successfully (key: {first_key}).")
     except Exception as e:
         logger.error(f"[{pii_safe_file_prefix}] Error loading RTTM '{diarization_file_path}': {e}", exc_info=True)
-        return {"error": f"Error loading RTTM: {e}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+        return {"error": f"Error loading RTTM: {e}", "transcript_json_path": None, "master_transcript_txt_path": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
 
     # --- Main Processing using a temporary directory for intermediate files ---
     final_transcribed_segments = []
@@ -369,24 +370,63 @@ def run_transcription(
     output_transcript_json_path = persistent_stage_output_dir / f"{pii_safe_file_prefix}_transcription.json"
     try:
         with open(output_transcript_json_path, 'w', encoding='utf-8') as f:
-            json.dump(final_transcribed_segments, f, indent=2, ensure_ascii=False) # Save the list of dicts
+            json.dump({
+                "file_info": {
+                    "original_audio_path": str(vocal_stem_path),
+                    "rttm_file_path": str(diarization_file_path),
+                    "processing_date": datetime.now().isoformat(),
+                    "whisper_model": whisper_model_name
+                },
+                "segments": final_transcribed_segments
+            }, f, indent=4, ensure_ascii=False)
         logger.info(f"[{pii_safe_file_prefix}] Main transcript JSON saved to: {output_transcript_json_path}")
-        
-        soundbite_dirs = []
-        if final_transcribed_segments: # Only try to get parent dirs if segments exist
-            soundbite_dirs = sorted(list(set([
-                str(Path(seg['soundbite_audio_path']).parent) 
-                for seg in final_transcribed_segments if 'soundbite_audio_path' in seg
-            ])))
-        
-        return {
-            "transcript_json_path": str(output_transcript_json_path.resolve()),
-            "soundbite_speaker_dirs": soundbite_dirs,
-            "message": f"Transcription complete. {len(final_transcribed_segments)} segments processed into soundbites."
-        }
-    except Exception as e_final:
-        logger.error(f"[{pii_safe_file_prefix}] Error during final JSON output generation: {e_final}", exc_info=True)
-        return {"error": f"Error in final output: {e_final}", "transcript_json_path": None, "soundbite_speaker_dirs": []}
+    except Exception as e:
+        logger.error(f"[{pii_safe_file_prefix}] Error writing main transcript JSON {output_transcript_json_path}: {e}")
+        # Decide if we should return early or try to continue with other outputs
+
+    # --- Write the master_transcript.txt file ---
+    master_transcript_txt_path = persistent_stage_output_dir / f"{pii_safe_file_prefix}_master_transcript.txt"
+    try:
+        with open(master_transcript_txt_path, 'w', encoding='utf-8') as f_txt:
+            for i, segment_data in enumerate(final_transcribed_segments):
+                speaker = segment_data.get('speaker', 'UNK')
+                start_s = segment_data.get('start_time', 0.0)
+                end_s = segment_data.get('end_time', 0.0)
+                text = segment_data.get('text', '').strip()
+                # Use sequence_id if available (e.g. from soundbite naming), otherwise use loop index
+                # Ensure sequence_id is an integer for formatting
+                raw_sequence_id = segment_data.get('sequence_id')
+                if isinstance(raw_sequence_id, str) and raw_sequence_id.isdigit():
+                    sequence_id_num = int(raw_sequence_id)
+                elif isinstance(raw_sequence_id, int):
+                    sequence_id_num = raw_sequence_id
+                else:
+                    sequence_id_num = i + 1 # Use 1-based index if not available or not numeric string
+                
+                f_txt.write(f"{sequence_id_num:04d} - {speaker}: [{start_s:.2f}s - {end_s:.2f}s] {text}\n\n")
+        logger.info(f"[{pii_safe_file_prefix}] Master transcript text file saved to: {master_transcript_txt_path}")
+    except Exception as e:
+        logger.error(f"[{pii_safe_file_prefix}] Error writing master transcript text file {master_transcript_txt_path}: {e}")
+        master_transcript_txt_path = None # Indicate failure
+
+    # --- Cleanup temporary working directory ---
+    if main_temp_dir.exists():
+        shutil.rmtree(main_temp_dir)
+
+    # --- Final Output ---
+    soundbite_dirs = []
+    if final_transcribed_segments: # Only try to get parent dirs if segments exist
+        soundbite_dirs = sorted(list(set([
+            str(Path(seg['soundbite_audio_path']).parent) 
+            for seg in final_transcribed_segments if 'soundbite_audio_path' in seg
+        ])))
+    
+    return {
+        "transcript_json_path": str(output_transcript_json_path) if output_transcript_json_path.exists() else None,
+        "master_transcript_txt_path": str(master_transcript_txt_path) if master_transcript_txt_path and master_transcript_txt_path.exists() else None,
+        "soundbite_speaker_dirs": soundbite_dirs,
+        "soundbite_output_base_dir": str(persistent_stage_output_dir) # For call_processor to locate speaker folders
+    }
 
 
 # --- Main block for testing (remains similar but now tests the refactored logic) ---

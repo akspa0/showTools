@@ -18,7 +18,14 @@ Processing multi-speaker audio recordings, especially paired call center data (`
 2.  **Automates Processing:** Automates the workflow of audio separation, normalization, speaker diarization, transcription, and summarization.
 3.  **Provides Detailed Transcriptions with Soundbites:** Generates not only full transcripts but also individual soundbite audio files (`.wav`) and corresponding text files (`.txt`) for each speaker segment. These soundbites are named using a PII-safe convention (sequence number and sanitized first few words of the utterance) and organized into speaker-specific subfolders, similar to the output of the `whisperBite.py` tool. This allows for easy access to and verification of specific utterances.
 4.  **Facilitates Call Review:** For paired recordings, it mixes the `recv` and `trans` vocal stems into a clear stereo audio file, merges their respective transcripts (maintaining speaker identity and soundbite references), and produces a combined LLM-generated summary of the entire call.
-5.  **Delivers Actionable Insights:** Provides LLM-generated summaries for individual streams and combined calls, offering quick insights into the conversation content.
+5.  **Delivers Actionable Insights (Initial Draft - User Input Needed):** 
+    *   Provides LLM-generated summaries for individual audio streams and combined calls. 
+    *   **Value Proposition:** These summaries aim to give users a rapid understanding of the audio's core content, key discussion points, decisions, and action items without needing to listen to the entire recording or sift through a full transcript. This drastically reduces review time and allows for quicker information retrieval and response.
+    *   **Use Cases:** 
+        *   Quickly grasping the gist of a customer service call.
+        *   Reviewing key takeaways from a meeting or interview.
+        *   Identifying calls that require more detailed manual review based on summary content.
+    *   **(Future Enhancements):** Could be expanded to include automated topic tagging, sentiment analysis, or extraction of specific entities (e.g., product names, customer IDs) mentioned in the audio, further enhancing the analytical value.
 6.  **Standardizes Outputs:** Ensures all outputs are consistently formatted and organized.
 
 ## Desired User Experience

@@ -4,6 +4,8 @@ import json
 import os
 import lmstudio as lms
 
+# Removed all attempts to import submodules for exceptions, as introspection shows they are direct attributes of lms
+
 logger = logging.getLogger(__name__)
 
 def _format_transcript_for_prompt(transcript_data):
@@ -100,7 +102,6 @@ def run_llm_summary(
     logger.info(f"[LLM Summary] Output directory: {output_dir}")
 
     # LM Studio Model Identifier from config
-    # Defaulting to a generic Llama 3 example, user should ensure this or their desired model is available in LM Studio
     lm_studio_model_identifier = config.get('lm_studio_model_identifier', 'NousResearch/Hermes-2-Pro-Llama-3-8B') 
     logger.info(f"[LLM Summary] Attempting to use LM Studio model: {lm_studio_model_identifier}")
 
@@ -152,53 +153,60 @@ Please generate a summary of the conversation:
     final_summary_file_path = output_dir / "final_analysis_summary.txt"
 
     try:
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing LM Studio client for model: {lm_studio_model_identifier}")
-        # --- Refactored Client Usage ---
-        # Default client, assumes LM Studio server at http://localhost:1234/v1
-        # One could make base_url configurable if needed: base_url=config.get('lm_studio_base_url', 'http://localhost:1234/v1')
-        client = lms.LMSClient() 
-        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] LMSClient initialized. Default base_url: {client.base_url}")
-
-        messages = [
-            {"role": "system", "content": "You are an AI assistant. Your task is to provide a concise summary of the following conversation transcript. Incorporate information about notable sound events if they provide relevant context."},
-            {"role": "user", "content": f"Conversation Transcript:\n---\n{transcript_prompt_text}\n---\n\nNotable Sound Events Information:\n---\n{clap_events_prompt_text}\n---\n\nPlease generate a summary of the conversation:"}
-        ]
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Initializing LM Studio model handle: {lm_studio_model_identifier}")
+        # --- Use Convenience API as per docs --- 
+        model = lms.llm(lm_studio_model_identifier) # Get model handle
+        logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Model handle obtained for {lm_studio_model_identifier}")
         
+        # The prompt is already constructed above
         # Configurable parameters for the chat completion, e.g., temperature, max_tokens
         temperature = config.get('lm_studio_temperature', 0.7)
-        max_tokens = config.get('lm_studio_max_tokens', 500) # Defaulting to a reasonable max for summaries
+        max_tokens = config.get('lm_studio_max_tokens', 500)
 
         logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Sending request to LM Studio model: {lm_studio_model_identifier}. Temp: {temperature}, MaxTokens: {max_tokens}")
         
-        completion = client.get_chat_completion(
-            model=lm_studio_model_identifier,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            # stream=False # Default is False for get_chat_completion
+        # Using model.respond() as per documentation
+        # The prompt variable here contains the full text including instructions and data
+        response = model.respond(
+            prompt,
+            config={"temperature": temperature, "max_tokens": max_tokens}
         )
         
-        # Extract response
-        if completion and completion.get('choices') and isinstance(completion['choices'], list) and len(completion['choices']) > 0:
-            message_content = completion['choices'][0].get('message', {}).get('content')
-            if message_content:
-                summary_content = message_content.strip()
-                logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Successfully received summary from LM Studio model.")
-            else:
-                summary_content = "LM Studio Error: Received empty message content from model."
-                logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}. Full API response: {completion}")
+        # Assuming response is either a string or an object with a .content attribute or similar
+        # Based on `print(model.respond("What is the meaning of life?"))` in docs, it might be directly a string.
+        if isinstance(response, str):
+            summary_content = response.strip()
+        elif hasattr(response, 'content') and isinstance(response.content, str):
+            summary_content = response.content.strip()
+        elif hasattr(response, 'choices') and response.choices and hasattr(response.choices[0], 'message') and hasattr(response.choices[0].message, 'content'):
+            # This structure is more like the OpenAI client or the previous LMSClient() attempt
+            # Keeping it as a fallback interpretation if the convenience API returns a richer object
+            summary_content = response.choices[0].message.content.strip()
         else:
-            summary_content = f"LM Studio Error: Unexpected response structure from model '{lm_studio_model_identifier}'. Check LM Studio logs."
-            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}. Full API response: {completion}")
-        # --- End Refactored Client Usage ---
+            # If the response structure is unknown, log it for debugging
+            logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Unexpected response structure from model.respond(): {type(response)} - {str(response)[:500]}")
+            summary_content = f"LM Studio Error: Unexpected response structure from model '{lm_studio_model_identifier}'."
 
-    except lms.errors.APIConnectionError as e_conn:
-        summary_content = f"LM Studio Connection Error: {e_conn}. Ensure LM Studio server is running at the expected address (likely http://localhost:1234/v1) and is accessible."
+        if summary_content and not summary_content.startswith("LM Studio Error:"):
+            logger.info(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] Successfully received summary from LM Studio model.")
+        # --- End Convenience API Usage ---
+
+    except lms.LMStudioModelNotFoundError as e_model_nf:
+        summary_content = f"LM Studio Model Not Found Error: {e_model_nf}. Ensure model '{lm_studio_model_identifier}' is available and correctly named."
         logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except lms.errors.LMStudioSDKError as e_sdk: # Catch other SDK specific errors
-        summary_content = f"LM Studio SDK Error: {e_sdk}. Model: '{lm_studio_model_identifier}'."
+    except lms.LMStudioServerError as e_server:
+        summary_content = f"LM Studio Server Error: {e_server}. Check LM Studio server status and logs."
         logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
-    except Exception as e_llm: # Broad exception for other errors
+    except lms.LMStudioPredictionError as e_pred:
+        summary_content = f"LM Studio Prediction Error: {e_pred}."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
+    except lms.LMStudioClientError as e_client: # More general client-side LMStudio error
+        summary_content = f"LM Studio Client Error: {e_client}."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
+    except lms.LMStudioError as e_lms: # Generic LMStudio base error
+        summary_content = f"Generic LM Studio Error: {e_lms}. Model: '{lm_studio_model_identifier}'."
+        logger.error(f"[{pii_safe_file_prefix if pii_safe_file_prefix else 'LLM Summary'}] {summary_content}")
+    except Exception as e_llm: # Broad exception for other unexpected errors
         # The original error message included the model identifier and a hint to check if it's loaded.
         # We should try to preserve that if possible, or make the new error equally informative.
         summary_content = f"LM Studio Error: An unexpected error occurred: {e_llm}. Ensure LM Studio is running, the model '{lm_studio_model_identifier}' is loaded/served, and the server is accessible."
@@ -278,42 +286,49 @@ def generate_llm_summary(
     summary_content = f"LLM summary generation failed for model '{lm_studio_model_identifier}'."
 
     try:
-        logger.info(f"[LLM GenSummary] Initializing LM Studio client.")
-        client = lms.LMSClient() # Default client, assumes LM Studio server at localhost:1234
+        logger.info(f"[LLM GenSummary] Initializing LM Studio model handle: {lm_studio_model_identifier}")
+        # --- Use Convenience API as per docs --- 
+        model = lms.llm(lm_studio_model_identifier) # Get model handle
+        logger.info(f"[LLM GenSummary] Model handle obtained for {lm_studio_model_identifier}")
         
-        logger.info(f"[LLM GenSummary] Sending request to LM Studio model: {lm_studio_model_identifier} with system prompt.")
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": formatted_transcript_text}
-        ]
+        # The prompt is already constructed above
+        # Configurable parameters for the chat completion, e.g., temperature, max_tokens
+        temperature = llm_config.get("temperature", 0.7)
+        max_tokens = llm_config.get("max_response_tokens", 1024)
 
-        # Parameters for the chat completion
-        # max_tokens for response, temperature, etc. can be added here if needed
-        # And potentially made configurable via llm_config
-        completion_params = {
-            "model": lm_studio_model_identifier,
-            "messages": messages,
-            # "temperature": llm_config.get("temperature", 0.7), # Example
-            # "max_tokens": llm_config.get("max_response_tokens", 1024) # Example for response length
-        }
+        logger.info(f"[LLM GenSummary] Sending request to LM Studio model: {lm_studio_model_identifier}. Temp: {temperature}, MaxTokens: {max_tokens}")
         
-        # The lmstudio-python library documentation should be consulted for exact parameters 
-        # related to context window if they exist at the client.chat.completions.create level.
-        # Often, context window is a server-side model setting.
-        logger.debug(f"[LLM GenSummary] Creating chat completion with params: {completion_params}")
-        completion = client.chat.completions.create(**completion_params)
-        
-        if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
-            summary_content = completion.choices[0].message.content.strip()
-            logger.info(f"[LLM GenSummary] Successfully received response from LM Studio model.")
+        # Use model.respond() for consistency
+        response = model.respond(formatted_transcript_text, config=completion_params)
+
+        if isinstance(response, str):
+            summary_content = response.strip()
+        elif hasattr(response, 'content') and isinstance(response.content, str):
+            summary_content = response.content.strip()
+        # Add more robust response parsing if needed, similar to run_llm_summary
         else:
-            logger.error("[LLM GenSummary] LM Studio response was empty or malformed.")
+            logger.error(f"[LLM GenSummary] Unexpected response structure from model.respond(): {type(response)} - {str(response)[:500]}")
             summary_content = "Error: LLM response was empty or malformed."
 
-    except lms.exceptions.LMStudioSDKError as e_sdk:
-        summary_content = f"LM Studio SDK Error: {e_sdk}. Ensure LM Studio is running, the model '{lm_studio_model_identifier}' is loaded/served, and network is configured."
-        logger.error(f"[LLM GenSummary] LM Studio SDK error: {e_sdk}")
+        if summary_content and not summary_content.startswith("Error:"):
+            logger.info(f"[LLM GenSummary] Successfully received response from LM Studio model.")
+        # --- End Convenience API Usage ---
+
+    except lms.LMStudioModelNotFoundError as e_model_nf:
+        summary_content = f"LM Studio Model Not Found Error: {e_model_nf}. Ensure model '{lm_studio_model_identifier}' is available."
+        logger.error(f"[LLM GenSummary] {summary_content}")
+    except lms.LMStudioServerError as e_server:
+        summary_content = f"LM Studio Server Error: {e_server}. Check LM Studio server status."
+        logger.error(f"[LLM GenSummary] {summary_content}")
+    except lms.LMStudioPredictionError as e_pred:
+        summary_content = f"LM Studio Prediction Error: {e_pred}."
+        logger.error(f"[LLM GenSummary] {summary_content}")
+    except lms.LMStudioClientError as e_client:
+        summary_content = f"LM Studio Client Error: {e_client}."
+        logger.error(f"[LLM GenSummary] {summary_content}")
+    except lms.LMStudioError as e_lms: # Generic LMStudio base error
+        summary_content = f"Generic LM Studio Error: {e_lms}. Model: '{lm_studio_model_identifier}'."
+        logger.error(f"[LLM GenSummary] {summary_content}")
     except Exception as e_llm:
         summary_content = f"Unexpected error during LLM interaction: {e_llm}."
         logger.error(f"[LLM GenSummary] Unexpected LLM interaction error: {e_llm}", exc_info=True)

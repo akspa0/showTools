@@ -237,53 +237,92 @@ def normalize_stem_audiomentations_core(input_path: Path, output_path: Path, tar
     try:
         samples, original_sr = sf.read(input_path, dtype='float32', always_2d=False)
         
-        current_samples = samples
-        current_sr = original_sr
+        current_samples_path = input_path
+        current_sr_for_norm = original_sr
 
-        # Ensure mono first (before potential resampling)
-        if current_samples.ndim > 1 and current_samples.shape[-1] > 1:
-             current_samples = np.mean(current_samples, axis=-1)
-             log.debug(f"Mixed {input_path.name} to mono for normalization.")
-
-        # Resample if necessary before normalization
-        if current_sr != target_sr:
-            log.debug(f"Resampling {input_path.name} from {current_sr}Hz to {target_sr}Hz for normalization.")
-            # Create a temporary path for resampling if input and output are the same
-            # This avoids issues if input_path is same as output_path with different SR
-            resample_input_path = input_path
-            if input_path == output_path: # Should not happen if logic is structured well, but as safeguard
-                 temp_resample_src_path = input_path.with_name(f"{input_path.stem}_presrc_{input_path.suffix}")
-                 shutil.copy2(input_path, temp_resample_src_path)
-                 resample_input_path = temp_resample_src_path
-            
-            temp_resampled_norm_path = output_path.with_name(f"{output_path.stem}_temp_rs_norm{output_path.suffix}")
-
-            resample_ok = resample_audio_ffmpeg_core(resample_input_path, temp_resampled_norm_path, target_sr, mono=True)
-            
-            if input_path == output_path and resample_input_path.exists() and resample_input_path != input_path:
-                os.remove(resample_input_path) # remove temp copy
-
-            if not resample_ok:
-                log.error(f"Failed to resample {input_path.name} to {target_sr}Hz. Skipping normalization.")
-                if input_path != output_path: shutil.copy2(input_path, output_path)
-                return output_path # Return original or copied path (not at target_sr)
-            
-            current_samples, current_sr = sf.read(temp_resampled_norm_path, dtype='float32') # sr is now target_sr
-            os.remove(temp_resampled_norm_path) # remove temp resampled file
-
-        augment = Compose([
-            LoudnessNormalization(min_lufs=float(target_lufs), max_lufs=float(target_lufs), p=1.0)
-        ])
-        processed_samples = augment(samples=current_samples, sample_rate=current_sr) # current_sr is target_sr
+        # --- Explicit Resampling Step using ffmpeg --- 
+        temp_resampled_path = None
+        if original_sr != target_sr:
+            log.debug(f"Resampling {input_path.name} from {original_sr}Hz to {target_sr}Hz before normalization.")
+            # Create a temporary path for the resampled audio in the same directory as output_path
+            temp_resampled_path = output_path.with_name(output_path.stem + "_temp_resampled.wav")
+            if resample_audio_ffmpeg_core(input_path, temp_resampled_path, target_sr, mono=True):
+                current_samples_path = temp_resampled_path
+                current_sr_for_norm = target_sr
+                log.debug(f"Successfully resampled to {temp_resampled_path}")
+                # Samples will be re-read from this resampled file
+            else:
+                log.error(f"Failed to resample {input_path.name} to {target_sr}Hz. Attempting normalization with original SR: {original_sr}Hz.")
+                # If resampling fails, continue with original samples and SR, ffmpeg peak limiter will handle final SR.
         
-        sf.write(output_path, processed_samples, current_sr)
-        log.info(f"Successfully normalized and wrote to {output_path} at {current_sr}Hz.")
+        # Read potentially resampled audio for audiomentations
+        # If resampling happened, current_samples_path is temp_resampled_path, otherwise it's input_path
+        samples_for_norm, sr_for_norm = sf.read(str(current_samples_path), dtype='float32', always_2d=False)
+        
+        # Ensure mono for audiomentations (ffmpeg resampling should have handled this if it ran)
+        if samples_for_norm.ndim > 1 and samples_for_norm.shape[-1] > 1:
+             samples_for_norm = np.mean(samples_for_norm, axis=-1)
+             log.debug(f"Mixed {current_samples_path.name} to mono for audiomentations step.")
+
+        # Corrected audiomentations parameters
+        augmenter = Compose([
+            LoudnessNormalization(min_lufs=target_lufs, max_lufs=target_lufs, p=1.0)
+        ])
+        # Apply augmentation using the sample rate of the (potentially resampled) input
+        normalized_samples = augmenter(samples=samples_for_norm, sample_rate=sr_for_norm)
+        
+        # Save LUFS-normalized samples to a temporary file for ffmpeg peak limiting
+        temp_lufs_normalized_path = output_path.with_name(output_path.stem + "_temp_lufs_normalized.wav")
+        # Write with sr_for_norm initially, ffmpeg will ensure final target_sr
+        sf.write(str(temp_lufs_normalized_path), normalized_samples, sr_for_norm, subtype='PCM_16') 
+        log.debug(f"Saved LUFS-normalized audio to temporary file: {temp_lufs_normalized_path} at {sr_for_norm}Hz")
+
+        # Apply True Peak Limiting using ffmpeg to the temporary file
+        target_true_peak_db = -1.5
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(temp_lufs_normalized_path),
+            "-af", f"alimiter=limit={target_true_peak_db}dB:level=false:level_out_fixed=true",
+            "-ar", str(target_sr), # Ensure final output sample rate is target_sr
+            str(output_path)      # Final output path
+        ]
+
+        description = f"True peak limiting ({target_true_peak_db}dBTP) for {temp_lufs_normalized_path.name}"
+        if run_ffmpeg_command_core(ffmpeg_cmd, description):
+            log.info(f"Successfully normalized and peak limited {input_path.name} to {output_path.name} at {target_sr}Hz")
+        else:
+            log.error(f"Failed to apply true peak limiting to {temp_lufs_normalized_path.name}. Output may not be peak limited or at target SR.")
+            if temp_lufs_normalized_path.exists() and temp_lufs_normalized_path != output_path:
+                 shutil.copy2(temp_lufs_normalized_path, output_path)
+                 log.warning(f"Copied {temp_lufs_normalized_path.name} to {output_path.name} as fallback (may not be peak limited or at target SR).")
+        
+        # Clean up temporary files
+        if temp_lufs_normalized_path.exists():
+            try:
+                os.remove(temp_lufs_normalized_path)
+                log.debug(f"Removed temporary LUFS file: {temp_lufs_normalized_path}")
+            except OSError as e:
+                log.warning(f"Could not remove temporary LUFS file {temp_lufs_normalized_path}: {e}")
+        if temp_resampled_path and temp_resampled_path.exists():
+            try:
+                os.remove(temp_resampled_path)
+                log.debug(f"Removed temporary resampled file: {temp_resampled_path}")
+            except OSError as e:
+                log.warning(f"Could not remove temporary resampled file {temp_resampled_path}: {e}")
+        
         return output_path
+
     except Exception as e:
-        log.error(f"Error during audiomentations LoudnessNormalization for {input_path}: {e}")
-        log.exception("Exception details:")
-        if input_path != output_path: shutil.copy2(input_path, output_path) # Fallback
-        return output_path
+        log.error(f"Error during normalization of {input_path.name}: {e}", exc_info=True)
+        # Fallback: copy original if all else fails, to ensure an output file exists if possible
+        if input_path != output_path: 
+            try:
+                shutil.copy2(input_path, output_path)
+                log.warning(f"Fallback: Copied original {input_path.name} to {output_path.name} due to normalization error.")
+            except Exception as e_copy:
+                log.error(f"Fallback copy also failed for {input_path.name}: {e_copy}")
+                return None # Critical failure
+        return output_path # Return original if copied, or if input_path was same as output_path
 
 
 def run_generic_preprocess(input_audio_path_str: str, base_output_dir_str: str, pii_safe_file_prefix: str, config: dict = None):
@@ -296,6 +335,13 @@ def run_generic_preprocess(input_audio_path_str: str, base_output_dir_str: str, 
     Accepts pii_safe_file_prefix for all output naming.
     Returns a dictionary with paths to processed stems and potentially the resampled original.
     """
+    # --- Debug flags ---
+    DEBUG_SKIP_STEM_SEPARATION = False  # Set to True to skip stem separation
+    DEBUG_SKIP_VOCAL_NORMALIZATION = False # Set to True to skip vocal normalization
+    DEBUG_SKIP_INSTRUMENTAL_NORMALIZATION = False # Set to True to skip instrumental normalization
+
+    log.info(f"Debug Flags: SkipSeparation={DEBUG_SKIP_STEM_SEPARATION}, SkipVocalNorm={DEBUG_SKIP_VOCAL_NORMALIZATION}, SkipInstrumentalNorm={DEBUG_SKIP_INSTRUMENTAL_NORMALIZATION}")
+
     if not all([Compose, LoudnessNormalization, sf, np]):
         log.warning("Audiomentations components not available. Skipping preprocessing.")
         return None
@@ -322,6 +368,7 @@ def run_generic_preprocess(input_audio_path_str: str, base_output_dir_str: str, 
 
     # Dictionary to store paths of final processed files for return
     processed_files = {}
+    target_sr_hz = config.get('target_sr_hz', DEFAULT_TARGET_SR_CORE)
 
     # --- 1. Optional: Resample original audio to target SR and mono for certain use cases ---
     # This might be useful if a mono, resampled version of the *original* (pre-separation) is needed.
@@ -335,63 +382,120 @@ def run_generic_preprocess(input_audio_path_str: str, base_output_dir_str: str, 
     # --- 2. Separate Stems (vocals/instrumental) --- 
     # Stems will be raw, at original SR of separator's output, potentially stereo (though usually mono)
     raw_stems_output_dir = temp_processing_sub_dir # Place raw stems from separator in a sub-temp dir
-    initial_separated_stems = separate_stems_core(
-        input_audio_path, 
-        raw_stems_output_dir, # This is base_temp_dir for separate_stems_core
-        config.get('separator_model_core', DEFAULT_SEPARATOR_MODEL_CORE),
-        pii_safe_file_prefix, # Pass the prefix down
-        config=config # Pass full config for dummy generation SR if needed
-    )
-    if not initial_separated_stems or 'vocals' not in initial_separated_stems:
-        log.error("Stem separation failed to produce vocals. Preprocessing aborted.")
-        return None
     
-    vocals_raw_path = initial_separated_stems['vocals']
-    instrumental_raw_path = initial_separated_stems.get('instrumental')
+    vocals_raw_path = None
+    instrumental_raw_path = None
+
+    if not DEBUG_SKIP_STEM_SEPARATION:
+        initial_separated_stems = separate_stems_core(
+            input_audio_path, 
+            raw_stems_output_dir, # This is base_temp_dir for separate_stems_core
+            config.get('separator_model_core', DEFAULT_SEPARATOR_MODEL_CORE),
+            pii_safe_file_prefix, # Pass the prefix down
+            config=config # Pass full config for dummy generation SR if needed
+        )
+        if not initial_separated_stems or 'vocals' not in initial_separated_stems:
+            log.error("Stem separation failed to produce vocals. Preprocessing aborted (or will use dummies if other steps active).")
+            # Fall through to dummy creation if normalization steps are not skipped
+        else:
+            vocals_raw_path = initial_separated_stems['vocals']
+            instrumental_raw_path = initial_separated_stems.get('instrumental')
+    else:
+        log.info("DEBUG: Skipping stem separation.")
+
+    # Create dummy raw stems if separation was skipped or failed, and normalization is expected
+    if vocals_raw_path is None or not vocals_raw_path.exists():
+        # Create a dummy vocal file if vocal normalization is not skipped or if instrumental norm is not skipped (implies need for full structure)
+        if not DEBUG_SKIP_VOCAL_NORMALIZATION or not DEBUG_SKIP_INSTRUMENTAL_NORMALIZATION:
+            dummy_vocal_name = f"{pii_safe_file_prefix}_vocals_raw_dummy.wav"
+            vocals_raw_path = raw_stems_output_dir / dummy_vocal_name
+            try:
+                if np and sf: # Create a valid silent WAV
+                    sf.write(str(vocals_raw_path), np.zeros(int(1 * target_sr_hz), dtype='float32'), target_sr_hz)
+                    log.info(f"Created dummy silent raw vocal stem (1s at {target_sr_hz}Hz): {vocals_raw_path}")
+                else: # Fallback to touch
+                    vocals_raw_path.touch()
+                    log.info(f"Created empty dummy raw vocal stem (fallback): {vocals_raw_path}")
+            except Exception as e_dummy:
+                log.error(f"Failed to create dummy raw vocal stem {vocals_raw_path}: {e_dummy}")
+                # If we can't even make a dummy, and it's needed, we might have issues.
+
+    if instrumental_raw_path is None or not instrumental_raw_path.exists():
+        if not DEBUG_SKIP_INSTRUMENTAL_NORMALIZATION:
+            dummy_instr_name = f"{pii_safe_file_prefix}_instrumental_raw_dummy.wav"
+            instrumental_raw_path = raw_stems_output_dir / dummy_instr_name
+            try:
+                if np and sf: # Create a valid silent WAV
+                    sf.write(str(instrumental_raw_path), np.zeros(int(1 * target_sr_hz), dtype='float32'), target_sr_hz)
+                    log.info(f"Created dummy silent raw instrumental stem (1s at {target_sr_hz}Hz): {instrumental_raw_path}")
+                else: # Fallback to touch
+                    instrumental_raw_path.touch()
+                    log.info(f"Created empty dummy raw instrumental stem (fallback): {instrumental_raw_path}")
+            except Exception as e_dummy:
+                log.error(f"Failed to create dummy raw instrumental stem {instrumental_raw_path}: {e_dummy}")
+
 
     # --- 3. Normalize Vocal Stem ---
-    if initial_separated_stems and 'vocals' in initial_separated_stems and initial_separated_stems['vocals'].exists():
-        raw_vocals_path = initial_separated_stems['vocals']
-        # Output normalized vocals directly to the main stage output directory (base_output_dir)
-        normalized_vocals_filename = f"{pii_safe_file_prefix}_vocals_normalized.wav"
-        normalized_vocals_path = base_output_dir / normalized_vocals_filename 
-        
-        processed_vocals = normalize_stem_audiomentations_core(
-            raw_vocals_path, 
-            normalized_vocals_path, 
-            config.get('vocal_target_lufs_core', DEFAULT_VOCAL_TARGET_LUFS_CORE), 
-            config.get('target_sr_core', DEFAULT_TARGET_SR_CORE)
-        )
-        if processed_vocals:
-            processed_files['vocals_normalized'] = str(processed_vocals)
-            log.info(f"Processed vocal stem saved to: {processed_vocals}")
+    if not DEBUG_SKIP_VOCAL_NORMALIZATION:
+        if vocals_raw_path and vocals_raw_path.exists():
+            # Output normalized vocals directly to the main stage output directory (base_output_dir)
+            normalized_vocals_filename = f"{pii_safe_file_prefix}_vocals_normalized.wav"
+            normalized_vocals_path = base_output_dir / normalized_vocals_filename 
+            
+            processed_vocals = normalize_stem_audiomentations_core(
+                vocals_raw_path, 
+                normalized_vocals_path, 
+                config.get('vocals_lufs', DEFAULT_VOCAL_TARGET_LUFS_CORE),
+                target_sr_hz
+            )
+            if processed_vocals:
+                processed_files['vocals_normalized'] = str(processed_vocals)
+                log.info(f"Processed vocal stem saved to: {processed_vocals}")
+            else:
+                log.warning(f"Vocal stem processing failed for {vocals_raw_path}. It will not be included in outputs.")
         else:
-            log.warning(f"Vocal stem processing failed for {raw_vocals_path}. It will not be included in outputs.")
-            # To ensure pipeline doesn't break if downstream expects this key, 
-            # we could return the raw path or None. For now, omitting if failed.
+            log.warning("Raw vocal stem not available or not found. Skipping vocal normalization.")
     else:
-        log.warning("Raw vocal stem not available after separation. Skipping vocal normalization.")
+        log.info("DEBUG: Skipping vocal normalization.")
+        # If skipped, still provide a path for consistency if the raw/dummy file exists
+        if vocals_raw_path and vocals_raw_path.exists():
+            # Copy raw/dummy to expected output location, or just record its path if it's already in temp_processing_sub_dir
+            final_vocal_path = base_output_dir / f"{pii_safe_file_prefix}_vocals_skipped_norm.wav"
+            shutil.copy2(vocals_raw_path, final_vocal_path)
+            processed_files['vocals_normalized'] = str(final_vocal_path)
+            log.info(f"DEBUG: Using raw/dummy vocal stem as output (normalization skipped): {final_vocal_path}")
+        else:
+            log.warning("DEBUG: Vocal normalization skipped, and no raw/dummy vocal stem available to use as output.")
 
     # --- 4. Normalize Instrumental Stem ---
-    if initial_separated_stems and 'instrumental' in initial_separated_stems and initial_separated_stems['instrumental'].exists():
-        raw_instrumental_path = initial_separated_stems['instrumental']
-        # Output normalized instrumentals directly to the main stage output directory (base_output_dir)
-        normalized_instrumental_filename = f"{pii_safe_file_prefix}_instrumental_normalized.wav"
-        normalized_instrumental_path = base_output_dir / normalized_instrumental_filename
+    if not DEBUG_SKIP_INSTRUMENTAL_NORMALIZATION:
+        if instrumental_raw_path and instrumental_raw_path.exists():
+            # Output normalized instrumentals directly to the main stage output directory (base_output_dir)
+            normalized_instrumental_filename = f"{pii_safe_file_prefix}_instrumental_normalized.wav"
+            normalized_instrumental_path = base_output_dir / normalized_instrumental_filename
 
-        processed_instrumental = normalize_stem_audiomentations_core(
-            raw_instrumental_path, 
-            normalized_instrumental_path, 
-            config.get('instrumental_target_lufs_core', DEFAULT_INSTRUMENTAL_TARGET_LUFS_CORE), 
-            config.get('target_sr_core', DEFAULT_TARGET_SR_CORE)
-        )
-        if processed_instrumental:
-            processed_files['instrumental_normalized'] = str(processed_instrumental)
-            log.info(f"Processed instrumental stem saved to: {processed_instrumental}")
+            processed_instrumental = normalize_stem_audiomentations_core(
+                instrumental_raw_path, 
+                normalized_instrumental_path, 
+                config.get('instrumental_lufs', DEFAULT_INSTRUMENTAL_TARGET_LUFS_CORE),
+                target_sr_hz
+            )
+            if processed_instrumental:
+                processed_files['instrumental_normalized'] = str(processed_instrumental)
+                log.info(f"Processed instrumental stem saved to: {processed_instrumental}")
+            else:
+                log.warning(f"Instrumental stem processing failed for {instrumental_raw_path}. It will not be included in outputs.")
         else:
-            log.warning(f"Instrumental stem processing failed for {raw_instrumental_path}. It will not be included in outputs.")
+            log.warning("Raw instrumental stem not available or not found. Skipping instrumental normalization.")
     else:
-        log.warning("Raw instrumental stem not available after separation. Skipping instrumental normalization.")
+        log.info("DEBUG: Skipping instrumental normalization.")
+        if instrumental_raw_path and instrumental_raw_path.exists():
+            final_instr_path = base_output_dir / f"{pii_safe_file_prefix}_instrumental_skipped_norm.wav"
+            shutil.copy2(instrumental_raw_path, final_instr_path)
+            processed_files['instrumental_normalized'] = str(final_instr_path)
+            log.info(f"DEBUG: Using raw/dummy instrumental stem as output (normalization skipped): {final_instr_path}")
+        else:
+            log.warning("DEBUG: Instrumental normalization skipped, and no raw/dummy instrumental stem available to use as output.")
 
     # --- 5. Cleanup temporary processing sub-directory ---
     if temp_processing_sub_dir.exists():
@@ -440,9 +544,9 @@ if __name__ == "__main__":
         
         test_config_core = {
             'separator_model_core': DEFAULT_SEPARATOR_MODEL_CORE,
-            'vocal_target_lufs_core': -6.0, # Example override
-            'instrumental_target_lufs_core': -12.0, # Example override
-            'target_sr_core': 44100
+            'vocals_lufs': -6.0, # Example override
+            'instrumental_lufs': -12.0, # Example override
+            'target_sr_hz': 44100
         }
         
         log.info(f"Running generic preprocessor with test config on: {test_input_file_core}")

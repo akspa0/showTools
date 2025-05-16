@@ -10,6 +10,15 @@
 - Generate complete conversation transcripts with accurate speaker attribution.
 - (Future) Create a chronologically ordered "show" file containing all processed calls with metadata.
 
+## LLM Summarization & Analysis Requirements (Initial Draft - User Input Needed)
+- **Purpose:** To provide concise, actionable insights from transcribed audio content, reducing the need for users to listen to full recordings or read lengthy transcripts.
+- **Key Outputs:** 
+    - **Concise Summary:** A brief overview of the main topics discussed, key decisions made, and action items identified in the audio.
+    - **(Optional/Future) Entity Extraction:** Identification of key entities (people, organizations, locations, etc.).
+    - **(Optional/Future) Sentiment Analysis:** Overall sentiment of the conversation or specific segments.
+- **Audience:** Users who need to quickly understand the content of an audio recording without manual review (e.g., call center supervisors, researchers, individuals reviewing past meetings).
+- **Value:** Saves time, improves accessibility of audio content, and enables quicker decision-making based on recorded conversations.
+
 ## Goals
 - Implement a robust, modular, workflow-driven system using `workflow_executor.py` (for per-file processing) and `call_processor.py` (for call data aggregation).
 - Utilize `pyannote.audio` for speaker diarization and `openai-whisper` for transcription.

@@ -32,6 +32,13 @@ This document outlines the key technologies, libraries, and technical decisions 
     *   **Purpose:** Used for loudness normalization of audio stems to target LUFS values. `audio_preprocessor.py` currently uses this.
 *   **`requests` (Implied for LM Studio):**
     *   **Purpose:** To communicate with the LM Studio local server via HTTP POST requests for generating LLM summaries.
+*   **`lmstudio-python` (Library for LM Studio):**
+    *   **Purpose:** Provides a Python client to interact with a local LM Studio server.
+    *   **Import Strategy (Confirmed):** 
+        *   Use `import lmstudio as lms` for the main module.
+        *   The `LMSClient` is accessed via `lms.LMSClient()` (if using the lower-level client) OR the convenience API `model = lms.llm("model-identifier")` is used, followed by `model.respond("prompt")`.
+        *   Specific LM Studio exceptions (e.g., `lms.LMStudioModelNotFoundError`, `lms.LMStudioServerError`, `lms.LMStudioClientError`, `lms.LMStudioError`) are attributes of the main `lms` module object and should be caught directly (e.g., `except lms.LMStudioModelNotFoundError:`).
+    *   **Submodules:** The `lmstudio.exceptions` or `lmstudio.errors` submodules were found *not* to exist or be importable in the current environment, despite some documentation suggesting them. Direct attribute access on the `lms` object is the confirmed method for exceptions.
 
 ## Development Environment & Setup
 

@@ -12,6 +12,10 @@ import subprocess
 # Global logger for the executor
 logger = logging.getLogger(__name__)
 
+# --- For Debugging: Set to a stage name to run only that stage, or None to run all --- 
+DEBUG_SINGLE_STAGE_NAME = "audio_preprocessing" # Changed from clap_event_annotation
+# Example stage names: "clap_event_annotation", "audio_preprocessing", "speaker_diarization", "transcription", "llm_summary_and_analysis"
+
 def setup_workflow_logging(log_level_str='INFO', log_file=None):
     """Configures logging for the workflow executor."""
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
@@ -196,6 +200,13 @@ def execute_workflow(workflow_file_path: str, input_audio_file_str: str, base_ou
         function_name = stage_def.get("function")
         stage_failed = False # Initialize stage_failed for each stage
         
+        # --- Debugging: Conditional stage execution ---
+        if DEBUG_SINGLE_STAGE_NAME and stage_name != DEBUG_SINGLE_STAGE_NAME:
+            logger.info(f"--- SKIPPING Stage {i+1}/{len(stages)}: {stage_name} (DEBUG_SINGLE_STAGE_NAME is set to '{DEBUG_SINGLE_STAGE_NAME}') ---")
+            workflow_context[stage_name] = {"status": "skipped_due_to_debug_flag", "output": None} # Add to context so it exists
+            continue
+        # --- End Debugging ---
+
         logger.info(f"--- Starting Stage {i+1}/{len(stages)}: {stage_name} ---")
         
         if not module_name or not function_name:
