@@ -2,40 +2,52 @@
 
 ## Current Overall Goal
 
-Successfully implement all stages of the audio processing workflow, including robust transcription, soundbite generation, and meaningful LLM-based summarization/analysis, ensuring outputs are accurate and meet user needs.
+Finalize all core audio processing and output generation features, including MP3 compression for individual calls, and implement the `show_compiler.py` script for creating aggregated "show files" from processed paired calls. Ensure robust PII safety and deliver user-friendly, organized outputs as defined in `projectbrief.md` and `productContext.md`.
 
-## Current Focus & Immediate Task
+## Current Focus & Immediate Tasks
 
-1.  **Diagnose and Resolve Terminal Echo Issue:** The terminal loses character echoing after `workflow_executor.py` runs, requiring a manual `reset`. This is the primary usability blocker.
-    *   **Status:** Imports-only test (`test_imports.py`) does *not* cause the issue, indicating the problem lies in the execution of one or more stages within the workflow.
-    *   **Strategy:** Systematically run `workflow_executor.py` with individual stages enabled/disabled to pinpoint the problematic module or library call.
-2.  **Test and Verify LLM Summarization Functionality:** Now that `llm_module.py` imports correctly using `import lmstudio as lms` and catches specific `lms.LMStudioError` exceptions.
-    *   **Strategy:** After resolving the terminal echo, run the full workflow and verify that the LLM stage connects to LM Studio, processes the transcript, and generates the expected summary output file.
-3.  **Refine LLM Purpose and Prompts:** Based on user feedback and the initial definitions in `projectbrief.md` and `productContext.md`.
+1.  **Implement MP3 Compression:** 
+    *   Add a utility function (likely in `call_processor.py` or a shared `utils.py`) to compress WAV files to MP3 using `ffmpeg`.
+    *   Integrate this into `call_processor.py` to convert the primary audio file in the "final output" directory (e.g., `final_processed_calls/[Sanitized_Call_Name]/[Sanitized_Call_Name].wav`) to MP3 format.
+    *   Decide on and implement MP3 compression for soundbites within the "final output" structure (if desired).
+
+2.  **Design and Implement `show_compiler.py`:**
+    *   **Inputs:** The base "final output" directory (e.g., `final_processed_calls/`).
+    *   **Outputs (in a `show_output` directory):** 
+        *   `show_audio.mp3` (concatenated MP3s of paired calls).
+        *   `show_timestamps.txt` (start times and names of calls in the show).
+        *   `show_transcript.txt` (concatenated plain text transcripts).
+    *   **Core Logic:** Filter for "pair" type calls using `call_type.txt`, sort chronologically, use `ffmpeg` for audio concatenation, and generate metadata files.
 
 ## Recent Changes & Discoveries
 
-*   **LM Studio Integration Resolved (Imports):** `llm_module.py` now correctly imports `lmstudio as lms` and references its specific exception classes (e.g., `lms.LMStudioModelNotFoundError`, `lms.LMStudioServerError`) directly as attributes of the `lms` object. This was confirmed by successful import via `test_imports.py` after direct introspection of the `lms` module.
-*   The `master_transcript.txt` generation is working correctly.
-*   Terminal echo issue is confirmed *not* to occur from module imports alone.
+*   **Advanced LLM Integration in `call_processor.py`:** 
+    *   Successfully implemented three distinct LLM calls (via `llm_module.generate_llm_summary`) for generating call names, synopses, and hashtag categories using approved, concise system prompts.
+    *   Outputs are saved to respective `.txt` files within the primary processed call directory (e.g., `processed_calls/[call_id]/`).
+*   **"Final Output" Structure Initiated in `call_processor.py`:**
+    *   Added `--final_output_dir` argument.
+    *   Creates a flatter, user-friendly directory for each call (e.g., `final_processed_calls/[Sanitized_Call_Name]/`).
+    *   This directory includes:
+        *   The primary call audio as `.wav` (awaiting MP3 compression).
+        *   A plain text `transcript.txt` (converted from JSON).
+        *   Copied `synopsis.txt` and `hashtags.txt`.
+        *   A `call_type.txt` file (e.g., containing "pair" or "single_recv") to aid `show_compiler.py`.
+*   **Previous Blockers Resolved:** Terminal echo issue and initial LLM import/usage issues are considered resolved.
 
-## Next Steps
+## Next Steps (Sequential)
 
-1.  **Isolate Terminal Echo Source:** Modify `workflow_executor.py` to test stages individually.
-2.  **Fix Terminal Echo Issue.**
-3.  **Conduct Full Workflow Test:** Verify all stages, including LLM summarization output.
-4.  **Review and Refine LLM Prompts and `projectbrief.md`/`productContext.md`** with user input regarding the LLM's specific tasks and desired outputs.
+1.  Implement MP3 compression functionality in `call_processor.py` for the main audio file in the "final output" directories.
+2.  Decide and implement if soundbites in the "final output" directories also require MP3 compression.
+3.  Develop the `show_compiler.py` script with audio concatenation, timestamp generation, and transcript aggregation features.
+4.  Conduct thorough end-to-end testing of the complete workflow from `workflow_executor.py` through `call_processor.py` to `show_compiler.py`.
+5.  Update all memory bank files to reflect these final additions and the overall completed state of this feature set.
 
 ## Active Decisions & Considerations
 
-*   **Terminal Echo Culprit:** Suspects include `clap_module` (due to `audio-separator` external process), `audio_preprocessor` (`ffmpeg`), or other libraries that might manipulate terminal state without proper restoration.
-*   **Defining LLM Utility (USER INPUT STILL KEY):** While imports are fixed, the *purpose* of the LLM summaries needs user validation and refinement to ensure the prompts and outputs are valuable.
-*   **Future Use of Structured Transcripts:** Consider how the detailed structured JSON transcripts (not just the plain text `master_transcript.txt`) could be used in the future for more advanced LLM tasks, such as show-level synopses or fine-grained Q&A. This influences how we might want to store or make these JSON files accessible in later processing stages (e.g., in `call_processor.py`).
-*   **Desired `05_final_output` Structure (for `call_processor.py`):** The final aggregated output for a call (e.g., in a hypothetical `05_final_output` stage managed by `call_processor.py`) should ideally include an LLM-derived call name, the LLM-generated call synopsis, copies of (or links to) the relevant soundbites, and the master transcript data (both JSON and TXT formats).
+*   **Instrumental Stems for Show Audio:** Needs clarification – should `show_audio.mp3` include instrumental stems, or is the current vocal-only mix from `call_processor.py` sufficient? (Current assumption: vocal-only based on existing `mixed_vocals.wav`).
+*   **MP3 Compression for Soundbites:** Decision pending on whether to compress the individual soundbite `.wav` files in the "final output" directory structure.
 
 ## Open Questions
 
-*   What are the precise, desired outputs from the LLM summarization stage? (e.g., bullet points, narrative summary, Q&A, entity extraction, sentiment analysis?)
-*   Who is the end-user of these summaries, and what decisions will they inform?
-*   Are there different types of summaries needed (e.g., per-stream vs. combined call)?
-*   How should the system handle cases where diarization produces no segments or speaker labels (relevant for transcript quality fed to LLM)?
+*   Should soundbites in the `final_output_dir/[call_name]/soundbites/` also be MP3 compressed? (Assuming soundbites are planned to be copied there eventually).
+*   Does the `show_audio.mp3` need to include instrumental stems, or is the current vocal-only mix from `call_processor.py` (i.e., `mixed_vocals.wav`) the correct source?
