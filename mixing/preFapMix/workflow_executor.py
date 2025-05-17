@@ -607,6 +607,54 @@ def main():
             # For now, continue processing other files.
         logger.info(f"--- Finished processing file: {audio_file} ---")
 
+        # --- Always finalize outputs after each workflow run ---
+        # Find the workflow run directory for this file
+        workflow_run_dirs = list(Path(args.output_dir).glob(f"*{audio_file.stem}*"))
+        if not workflow_run_dirs:
+            logger.warning(f"No workflow run directory found for {audio_file.name} in {args.output_dir} (for finalization)")
+            continue
+        workflow_run_dir = workflow_run_dirs[0]
+        # Only finalize if this is a workflow run directory (not a stage subfolder)
+        # Check for presence of stage subfolders (e.g., 00_clap_event_annotation) to confirm
+        stage_dirs = [d for d in workflow_run_dir.iterdir() if d.is_dir() and re.match(r"\d{2}_", d.name)]
+        if not stage_dirs:
+            logger.warning(f"Skipping finalization for {workflow_run_dir} as it does not appear to be a workflow run directory.")
+            continue
+        processed_calls_dir = Path(args.output_dir) / 'processed_calls'
+        final_output_dir = Path(args.output_dir) / '05_final_output'
+        processed_calls_dir.mkdir(parents=True, exist_ok=True)
+        final_output_dir.mkdir(parents=True, exist_ok=True)
+        # Path to call_processor.py (assume it's in the same directory as this script)
+        current_script_dir = Path(__file__).resolve().parent
+        path_to_call_processor_script = current_script_dir / "call_processor.py"
+        if not path_to_call_processor_script.is_file():
+            logger.error(f"call_processor.py not found at expected location: {path_to_call_processor_script}. Cannot proceed with finalization.")
+            continue
+        call_processor_cmd_list = [
+            "python", str(path_to_call_processor_script),
+            "--input_run_dir", str(workflow_run_dir.resolve()),
+            "--output_call_dir", str(processed_calls_dir.resolve()),
+            "--final_output_dir", str(final_output_dir.resolve()),
+            "--log_level", args.log_level
+        ]
+        if args.cp_llm_model_id:
+            call_processor_cmd_list.extend(["--llm_model_id", args.cp_llm_model_id])
+        logger.info(f"Finalizing output for {audio_file.name} using call_processor.py...")
+        try:
+            process_env = os.environ.copy()
+            completed_process = subprocess.run(
+                call_processor_cmd_list,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=process_env,
+            )
+            logger.info(f"call_processor.py output:\n{completed_process.stdout}")
+            if completed_process.stderr:
+                logger.warning(f"call_processor.py errors:\n{completed_process.stderr}")
+        except Exception as e:
+            logger.error(f"Failed to run call_processor.py for {audio_file.name}: {e}")
+
     logger.info(f"All individual file workflow executions complete. Overall success: {all_workflows_succeeded}")
 
     # --- Conditional call_processor.py invocation --- 

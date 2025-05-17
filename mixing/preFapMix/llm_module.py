@@ -152,6 +152,7 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
     Flexible LLM task runner. For each task in config['llm_tasks'], renders the prompt_template with transcript/context,
     sends to the LLM, and saves the response to the specified output_file. Supports arbitrary LLM-powered utilities.
     Accepts output_dir or output_dir_str for compatibility with workflow_executor.py.
+    Returns a dict of output file paths for workflow context mapping.
     """
     import os
     import logging
@@ -175,7 +176,7 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
     llm_tasks = config.get('llm_tasks', [])
     if not llm_tasks:
         logger.warning("No llm_tasks defined in config; nothing to do.")
-        return
+        return {"llm_outputs": {}}
     
     lm_studio_base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
     lm_studio_api_key = config.get('lm_studio_api_key', 'lm-studio')
@@ -185,6 +186,7 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
     
     client = OpenAI(base_url=lm_studio_base_url, api_key=lm_studio_api_key)
     
+    output_paths = {}
     for task in llm_tasks:
         name = task.get('name', 'unnamed_task')
         prompt_template = task.get('prompt_template', '')
@@ -203,8 +205,12 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(result)
             logger.info(f"[LLM Task: {name}] Output written to {out_path}")
+            output_paths[name] = out_path
         except Exception as e:
             logger.error(f"[LLM Task: {name}] LLM request failed: {e}")
+    # For backward compatibility, provide summary_text_file_path as the call_synopsis output if present
+    summary_path = output_paths.get('call_synopsis') or next(iter(output_paths.values()), None)
+    return {"llm_outputs": output_paths, "summary_text_file_path": summary_path}
 
 # Backward compatibility: alias run_llm_summary to run_llm_tasks with a single-task list if needed
 

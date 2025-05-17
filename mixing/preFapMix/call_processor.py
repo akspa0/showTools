@@ -760,7 +760,7 @@ Objective and clear."""
 
     # --- Final Output Generation (Flatter Structure) ---
     # Always use '05_final_output' as the final output directory inside the main output directory
-    main_output_dir = call_output_base_dir
+    main_output_dir = output_call_base_dir
     final_output_dir_base_path = main_output_dir / '05_final_output'
     final_output_dir_base_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"[{call_id}] Using fixed final output directory: {final_output_dir_base_path}")
