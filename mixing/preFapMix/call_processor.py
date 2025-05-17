@@ -107,66 +107,57 @@ def find_call_pairs(input_run_dir: Path):
     """
     Scans the input_run_dir for workflow output directories, generates call_ids,
     and groups them into pairs (recv_out, trans_out) or singles.
-    
-    Returns:
-        dict: {
-            call_id_1: {"recv_run_dir": Path(), "trans_run_dir": Path(), "type": "pair"},
-            call_id_2: {"run_dir": Path(), "type": "single_recv" or "single_trans" or "single_unknown"},
-            ...
-        }
+    If the directory contains only stage subfolders (e.g., 00_clap_event_annotation),
+    treat the whole directory as a single job for a single audio file.
     """
     logger.info(f"Scanning for call pairs in: {input_run_dir}")
-    potential_calls = {} # Stores call_id -> list of full_path_to_workflow_run_dir
-
+    # Check for stage subfolders (e.g., 00_clap_event_annotation)
+    stage_dirs = [d for d in input_run_dir.iterdir() if d.is_dir() and re.match(r"\d{2}_", d.name)]
+    if stage_dirs and all(d.is_dir() for d in input_run_dir.iterdir() if d.is_dir()):
+        # This is a workflow run for a single audio file
+        call_id = input_run_dir.name
+        logger.info(f"Detected single audio workflow run. Treating {input_run_dir} as a single job with call_id: {call_id}")
+        return {call_id: {"run_dir": input_run_dir, "type": "single_audio"}}
+    # Otherwise, use the original logic for call/call-pair folders
+    potential_calls = {}
     if not input_run_dir.is_dir():
         logger.error(f"Input run directory not found or not a directory: {input_run_dir}")
         return {}
-
     for item in input_run_dir.iterdir():
-        if item.is_dir(): # Each item is a workflow run directory
+        if item.is_dir():
             dir_name = item.name
             call_id = generate_call_id_from_workflow_dir_name(dir_name)
-            
             if call_id not in potential_calls:
                 potential_calls[call_id] = []
-            potential_calls[call_id].append(item) # Store the Path object
+            potential_calls[call_id].append(item)
             logger.debug(f"Associated dir '{dir_name}' with call_id '{call_id}'.")
-
-    # Process potential_calls to identify definitive pairs and singles
     call_jobs = {}
     for call_id, run_dirs in potential_calls.items():
         recv_dir = None
         trans_dir = None
-        
         for run_dir in run_dirs:
-            dir_name = run_dir.name.lower() # Use lower for matching prefixes
+            dir_name = run_dir.name.lower()
             if "recv_out" in dir_name:
-                if recv_dir: logger.warning(f"Multiple recv_out dirs found for call_id '{call_id}\': {recv_dir.name}, {run_dir.name}. Using first one.")
+                if recv_dir: logger.warning(f"Multiple recv_out dirs found for call_id '{call_id}': {recv_dir.name}, {run_dir.name}. Using first one.")
                 else: recv_dir = run_dir
             elif "trans_out" in dir_name:
-                if trans_dir: logger.warning(f"Multiple trans_out dirs found for call_id '{call_id}\': {trans_dir.name}, {run_dir.name}. Using first one.")
+                if trans_dir: logger.warning(f"Multiple trans_out dirs found for call_id '{call_id}': {trans_dir.name}, {run_dir.name}. Using first one.")
                 else: trans_dir = run_dir
-        
         if recv_dir and trans_dir:
             call_jobs[call_id] = {"recv_run_dir": recv_dir, "trans_run_dir": trans_dir, "type": "pair"}
-            logger.info(f"Identified PAIR for call_id '{call_id}\': recv='{recv_dir.name}\', trans='{trans_dir.name}\'")
+            logger.info(f"Identified PAIR for call_id '{call_id}': recv='{recv_dir.name}', trans='{trans_dir.name}'")
         elif recv_dir:
             call_jobs[call_id] = {"run_dir": recv_dir, "type": "single_recv"}
-            logger.info(f"Identified SINGLE_RECV for call_id '{call_id}\': '{recv_dir.name}\'")
+            logger.info(f"Identified SINGLE_RECV for call_id '{call_id}': '{recv_dir.name}'")
         elif trans_dir:
             call_jobs[call_id] = {"run_dir": trans_dir, "type": "single_trans"}
-            logger.info(f"Identified SINGLE_TRANS for call_id '{call_id}\': '{trans_dir.name}\'")
+            logger.info(f"Identified SINGLE_TRANS for call_id '{call_id}': '{trans_dir.name}'")
         else:
-            # This case might happen if a directory didn't match recv_out/trans_out but got a call_id
-            # Or if multiple non-recv/trans dirs got the same call_id.
-            if run_dirs: # If there are any dirs associated
-                # Take the first one as a representative for a single unknown type
+            if run_dirs:
                 call_jobs[call_id] = {"run_dir": run_dirs[0], "type": "single_unknown"}
-                logger.warning(f"Identified SINGLE_UNKNOWN for call_id '{call_id}\' from dir '{run_dirs[0].name}\'. Contains neither 'recv_out' nor 'trans_out' in name.")
-            else: # Should not happen if potential_calls was populated correctly
-                logger.error(f"Call ID '{call_id}\' had no associated directories after prefix checking. This is unexpected.")
-
-
+                logger.warning(f"Identified SINGLE_UNKNOWN for call_id '{call_id}' from dir '{run_dirs[0].name}'. Contains neither 'recv_out' nor 'trans_out' in name.")
+            else:
+                logger.error(f"Call ID '{call_id}' had no associated directories after prefix checking. This is unexpected.")
     return call_jobs
 
 
@@ -523,24 +514,19 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         else:
             logger.warning(f"[{call_id}] Could not merge transcripts as one or both transcript files are missing.")
 
-    elif job_details["type"].startswith("single"):
+    elif job_details["type"].startswith("single") or job_details["type"] == "single_audio":
         run_dir = job_details["run_dir"]
-        stream_type = job_details["type"].replace("single_", "") # recv, trans, or unknown
-        
+        stream_type = job_details["type"].replace("single_", "") if job_details["type"] != "single_audio" else "audio"
         # If this is a regular audio file (not a call), use a generic description
-        if is_regular_audio:
+        if is_regular_audio or job_details["type"] == "single_audio":
             stream_type = "audio" # Use a neutral stream type for non-call files
-        
         logger.info(f"[{call_id}] Processing as {job_details['type'].upper()}. DIR: {run_dir.name}")
-        
         vocal_stem_path = _find_output_file(run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
         transcript_path = _find_output_file(run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
         summary_path = _find_output_file(run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
-
         # Copy vocal stem (will be mono)
         if vocal_stem_path:
             shutil.copy2(vocal_stem_path, call_output_dir / f"{call_id}_{stream_type}_{VOCAL_STEM_FILENAME}")
-        
         # Use transcript as the "merged" transcript for LLM processing
         merged_transcript_path = None
         if transcript_path:
@@ -548,12 +534,10 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
             shutil.copy2(transcript_path, target_transcript_path)
             merged_transcript_path = target_transcript_path # For LLM functions
             logger.info(f"[{call_id}] Using single stream transcript for LLM: {merged_transcript_path}")
-
         if summary_path:
             shutil.copy2(summary_path, call_output_dir / f"{call_id}_{stream_type}_stream_summary.txt")
-        
         # For non-call audio, use a more appropriate prefix than "RECV_" or "TRANS_"
-        speaker_prefix = "SPEAKER_" if is_regular_audio else stream_type.upper()
+        speaker_prefix = "SPEAKER_" if is_regular_audio or job_details["type"] == "single_audio" else stream_type.upper()
         _copy_soundbite_directories(run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, speaker_prefix, call_id)
     
     else:
@@ -582,7 +566,7 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         call_synopsis_system_prompt = ""
         hashtag_categories_system_prompt = ""
         
-        if is_regular_audio:
+        if is_regular_audio or job_details["type"] == "single_audio":
             # For regular audio (non-call), use more generic prompts
             call_name_system_prompt = "Generate a descriptive title for this audio file in under 10 words. Output title only."
             call_synopsis_system_prompt = """Create a concise summary of the audio content covering:
@@ -758,145 +742,6 @@ Objective and clear."""
     elif not (merged_transcript_path and merged_transcript_path.exists()):
         logger.warning(f"[{call_id}] Merged transcript not found or not specified. Skipping LLM processing (name, synopsis, hashtags).")
 
-    # --- Final Output Generation (Flatter Structure) ---
-    # Always use '05_final_output' as the final output directory inside the main output directory
-    main_output_dir = output_call_base_dir
-    final_output_dir_base_path = main_output_dir / '05_final_output'
-    final_output_dir_base_path.mkdir(parents=True, exist_ok=True)
-    logger.info(f"[{call_id}] Using fixed final output directory: {final_output_dir_base_path}")
-    if final_output_dir_base_path:
-        # First list all available files for debugging
-        logger.debug(f"[{call_id}] Available files in main output directory before final output generation:")
-        try:
-            for item in call_output_dir.iterdir():
-                logger.debug(f"[{call_id}]  - {item.name} ({item.stat().st_size} bytes)")
-        except Exception as e:
-            logger.error(f"[{call_id}] Error listing main output directory contents: {e}")
-    
-        suggested_content_name_text = call_id # Fallback to call_id
-        call_name_path = call_output_dir / f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
-        if call_name_path.exists():
-            logger.info(f"[{call_id}] Found content name file: {call_name_path}")
-            try:
-                with open(call_name_path, 'r', encoding='utf-8') as f_name:
-                    raw_title = f_name.read().strip()
-                    logger.info(f"[{call_id}] Raw content name (pre-strip): '{raw_title}'")
-                    # Strip quotes if present
-                    if raw_title.startswith('"') and raw_title.endswith('"'):
-                        raw_title = raw_title[1:-1].strip()
-                        logger.info(f"[{call_id}] Raw content name (stripped quotes): '{raw_title}'")
-                    # Sanitize raw_title for directory/filename use:
-                    sanitized_name = re.sub(r'[^\w\s-]', '', raw_title).strip().replace(' ', '_')
-                    sanitized_name = re.sub(r'_+', '_', sanitized_name)
-                    logger.info(f"[{call_id}] Sanitized content name: '{sanitized_name}'")
-                    if sanitized_name:
-                        suggested_content_name_text = sanitized_name
-                        logger.info(f"[{call_id}] Using sanitized name for final dir: '{suggested_content_name_text}'")
-                    else:
-                        logger.warning(f"[{call_id}] Sanitized content name is empty after processing. Falling back to call_id.")
-            except Exception as e:
-                logger.error(f"[{call_id}] Could not read or sanitize content name for final output dir: {e}")
-        else:
-            logger.warning(f"[{call_id}] Content name file not found at expected path: {call_name_path}. Using call_id as fallback.")
-        
-        final_content_specific_dir = final_output_dir_base_path / suggested_content_name_text
-        try:
-            logger.info(f"[{call_id}] Creating final output directory: {final_content_specific_dir}")
-            final_content_specific_dir.mkdir(parents=True, exist_ok=True)
-
-            # 1. Copy/Rename main audio (WAV for now)
-            source_audio_for_final = None
-            # mixed_vocals_output_path is defined if it's a pair and mixing was successful
-            # vocal_stem_path is defined for single streams (and copied to call_output_dir)
-
-            if job_details["type"] == "pair":
-                if 'mixed_vocals_output_path' in locals() and mixed_vocals_output_path and mixed_vocals_output_path.exists():
-                    source_audio_for_final = mixed_vocals_output_path
-            elif job_details["type"].startswith("single"):
-                stream_type = job_details["type"].replace("single_", "")
-                # Path to the copied single vocal stem in the primary call_output_dir
-                single_vocal_in_call_dir = call_output_dir / f"{call_id}_{stream_type}_{VOCAL_STEM_FILENAME}"
-                if single_vocal_in_call_dir.exists():
-                    source_audio_for_final = single_vocal_in_call_dir
-            
-            if source_audio_for_final:
-                final_audio_filename_wav = f"{suggested_content_name_text}.wav"
-                final_audio_filename_mp3 = f"{suggested_content_name_text}.mp3"
-                final_wav_path = final_content_specific_dir / final_audio_filename_wav
-                final_mp3_path = final_content_specific_dir / final_audio_filename_mp3
-                
-                # First, copy the WAV file to the final directory
-                shutil.copy2(source_audio_for_final, final_wav_path)
-                
-                # Then convert it to MP3
-                if _convert_wav_to_mp3(final_wav_path, final_mp3_path, call_id):
-                    # If MP3 conversion is successful, remove the WAV file
-                    try:
-                        os.remove(final_wav_path)
-                        logger.info(f"[{call_id}] Converted to MP3 and removed original WAV: {final_mp3_path}")
-                    except Exception as e:
-                        logger.warning(f"[{call_id}] Converted to MP3 but failed to remove original WAV ({final_wav_path}): {e}")
-                else:
-                    logger.error(f"[{call_id}] Failed to convert WAV to MP3, keeping original WAV file: {final_wav_path}")
-            else:
-                logger.warning(f"[{call_id}] No source audio found to copy to final output directory.")
-
-            # 2. Create Plain Text Transcript
-            # merged_transcript_path is defined earlier (either merged pair or single stream transcript)
-            if 'merged_transcript_path' in locals() and merged_transcript_path and merged_transcript_path.exists():
-                plain_text_transcript_target_path = final_content_specific_dir / "transcript.txt"
-                _convert_json_transcript_to_plain_text(merged_transcript_path, plain_text_transcript_target_path, call_id)
-                logger.info(f"[{call_id}] Created plain text transcript: {plain_text_transcript_target_path}")
-            else:
-                logger.warning(f"[{call_id}] No transcript found to convert to plain text for final output.")
-
-            # 3. Copy Synopsis
-            synopsis_path = call_output_dir / f"{call_id}_{COMBINED_SUMMARY_FILENAME}"
-            if synopsis_path.exists():
-                shutil.copy2(synopsis_path, final_content_specific_dir / "synopsis.txt")
-                logger.info(f"[{call_id}] Copied synopsis file to final output: {final_content_specific_dir / 'synopsis.txt'}")
-            else:
-                logger.warning(f"[{call_id}] No synopsis file found to copy to final output: {synopsis_path}")
-
-            # 4. Copy Hashtags
-            hashtags_path = call_output_dir / f"{call_id}{HASHTAGS_FILENAME_SUFFIX}"
-            if hashtags_path.exists():
-                shutil.copy2(hashtags_path, final_content_specific_dir / "hashtags.txt")
-                logger.info(f"[{call_id}] Copied hashtags file to final output: {final_content_specific_dir / 'hashtags.txt'}")
-            else:
-                logger.warning(f"[{call_id}] No hashtags file found to copy to final output: {hashtags_path}")
-            
-            # 5. Copy Content Name
-            call_name_path = call_output_dir / f"{call_id}{SUGGESTED_NAME_FILENAME_SUFFIX}"
-            if call_name_path.exists():
-                content_name_output_path = final_content_specific_dir / (
-                    "content_name.txt" if is_regular_audio else "call_name.txt"
-                )
-                shutil.copy2(call_name_path, content_name_output_path)
-                logger.info(f"[{call_id}] Copied content name file to final output: {content_name_output_path}")
-            else:
-                logger.warning(f"[{call_id}] No content name file found to copy to final output: {call_name_path}")
-                
-            # 6. Write type text file (for show_compiler.py to identify pairs)
-            type_filename = "audio_type.txt" if is_regular_audio else "call_type.txt"
-            with open(final_content_specific_dir / type_filename, "w", encoding="utf-8") as f_type:
-                content_type = "regular_audio" if is_regular_audio else job_details["type"]
-                f_type.write(content_type)
-            
-            logger.info(f"[{call_id}] Final output structure generated at: {final_content_specific_dir}")
-            
-            # List the contents of the final output directory
-            logger.debug(f"[{call_id}] Final output directory contents:")
-            try:
-                for item in final_content_specific_dir.iterdir():
-                    logger.debug(f"[{call_id}]  - {item.name} ({item.stat().st_size} bytes)")
-            except Exception as e:
-                logger.error(f"[{call_id}] Error listing final output directory contents: {e}")
-
-        except Exception as e_final_struct:
-            logger.error(f"[{call_id}] Error during final output structure generation for '{suggested_content_name_text}': {e_final_struct}", exc_info=True)
-    # --- End of Final Output Generation ---
-    
     logger.info(f"[{call_id}] Finished processing call.")
 
 

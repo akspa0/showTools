@@ -35,40 +35,6 @@ def setup_logging(log_level_str='INFO'):
     logger.info(f"Logging setup with level: {log_level_str}")
 
 
-def scan_final_output_dir(input_dir: Path):
-    """
-    Scans the input directory for call folders and checks for 'call_type.txt'
-    to identify the call type (pair, single_recv, etc.).
-    
-    Returns:
-        dict: A dictionary mapping call folder paths to their types.
-    """
-    logger.info(f"Scanning final output directory: {input_dir}")
-    call_folders = {}
-    
-    if not input_dir.is_dir():
-        logger.error(f"Input directory not found or not a directory: {input_dir}")
-        return {}
-    
-    for item in input_dir.iterdir():
-        if item.is_dir():
-            call_type_file = item / CALL_TYPE_FILENAME
-            
-            if call_type_file.exists():
-                try:
-                    with open(call_type_file, 'r', encoding='utf-8') as f:
-                        call_type = f.read().strip()
-                    call_folders[item] = call_type
-                    logger.debug(f"Found call folder: {item.name}, type: {call_type}")
-                except Exception as e:
-                    logger.warning(f"Error reading call_type.txt for {item.name}: {e}")
-            else:
-                logger.warning(f"No call_type.txt found in {item.name}, skipping")
-    
-    logger.info(f"Found {len(call_folders)} call folders in total.")
-    return call_folders
-
-
 def filter_pair_calls(call_folders):
     """
     Filters the call folders to only include those of type 'pair'.
@@ -422,11 +388,7 @@ def main():
         return
 
     # 1. Scan input directory for call folders
-    call_folders = scan_final_output_dir(input_dir_path)
-    
-    if not call_folders:
-        logger.info("No call folders found. Exiting.")
-        return
+    # [REMOVED: Old scan_final_output_dir and final output directory logic will be replaced by the new final output builder.]
     
     # 2. Filter for pair calls (unless --include_singles is specified)
     if not args.include_singles:

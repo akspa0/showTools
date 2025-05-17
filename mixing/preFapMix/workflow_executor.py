@@ -510,6 +510,7 @@ def main():
         # 2. Locate the normalized audio (e.g., 01_audio_preprocessing/yourfile_normalized.wav)
         # 3. Segment and output to 06_clap_separation/calls/
         # 4. Add segments to files_to_process
+        new_segments = []
         for audio_file_str in list(files_to_process):
             audio_file = Path(audio_file_str)
             # Find the workflow run directory for this file (if it exists)
@@ -539,7 +540,10 @@ def main():
             # Output dir for segments
             seg_dir = workflow_run_dir / "06_clap_separation" / "calls"
             segments = segment_audio_by_clap_annotations(norm_audio, clap_json, seg_dir)
-            files_to_process.extend(segments)
+            new_segments.extend(segments)
+        # Replace files_to_process with segments if any were found
+        if new_segments:
+            files_to_process = new_segments
     else:
         print("[INFO] CLAP-based call segmentation is DISABLED.")
 
@@ -607,121 +611,10 @@ def main():
             # For now, continue processing other files.
         logger.info(f"--- Finished processing file: {audio_file} ---")
 
-        # --- Always finalize outputs after each workflow run ---
-        # Find the workflow run directory for this file
-        workflow_run_dirs = list(Path(args.output_dir).glob(f"*{audio_file.stem}*"))
-        if not workflow_run_dirs:
-            logger.warning(f"No workflow run directory found for {audio_file.name} in {args.output_dir} (for finalization)")
-            continue
-        workflow_run_dir = workflow_run_dirs[0]
-        # Only finalize if this is a workflow run directory (not a stage subfolder)
-        # Check for presence of stage subfolders (e.g., 00_clap_event_annotation) to confirm
-        stage_dirs = [d for d in workflow_run_dir.iterdir() if d.is_dir() and re.match(r"\d{2}_", d.name)]
-        if not stage_dirs:
-            logger.warning(f"Skipping finalization for {workflow_run_dir} as it does not appear to be a workflow run directory.")
-            continue
-        processed_calls_dir = Path(args.output_dir) / 'processed_calls'
-        final_output_dir = Path(args.output_dir) / '05_final_output'
-        processed_calls_dir.mkdir(parents=True, exist_ok=True)
-        final_output_dir.mkdir(parents=True, exist_ok=True)
-        # Path to call_processor.py (assume it's in the same directory as this script)
-        current_script_dir = Path(__file__).resolve().parent
-        path_to_call_processor_script = current_script_dir / "call_processor.py"
-        if not path_to_call_processor_script.is_file():
-            logger.error(f"call_processor.py not found at expected location: {path_to_call_processor_script}. Cannot proceed with finalization.")
-            continue
-        call_processor_cmd_list = [
-            "python", str(path_to_call_processor_script),
-            "--input_run_dir", str(workflow_run_dir.resolve()),
-            "--output_call_dir", str(processed_calls_dir.resolve()),
-            "--final_output_dir", str(final_output_dir.resolve()),
-            "--log_level", args.log_level
-        ]
-        if args.cp_llm_model_id:
-            call_processor_cmd_list.extend(["--llm_model_id", args.cp_llm_model_id])
-        logger.info(f"Finalizing output for {audio_file.name} using call_processor.py...")
-        try:
-            process_env = os.environ.copy()
-            completed_process = subprocess.run(
-                call_processor_cmd_list,
-                capture_output=True,
-                text=True,
-                check=False,
-                env=process_env,
-            )
-            logger.info(f"call_processor.py output:\n{completed_process.stdout}")
-            if completed_process.stderr:
-                logger.warning(f"call_processor.py errors:\n{completed_process.stderr}")
-        except Exception as e:
-            logger.error(f"Failed to run call_processor.py for {audio_file.name}: {e}")
-
     logger.info(f"All individual file workflow executions complete. Overall success: {all_workflows_succeeded}")
 
-    # --- Conditional call_processor.py invocation --- 
-    if args.input_dir and args.output_dir and args.final_call_output_dir:
-        if not all_workflows_succeeded:
-            logger.warning("One or more individual file workflows failed. Skipping combined call processing.")
-            return # Return instead of exiting to allow potential cleanup or further script logic if any
-            
-        # Use the is_potential_call_folder flag determined earlier
-        if is_potential_call_folder:
-            logger.info(f"Call folder detected in '{args.input_dir}'. Attempting to run call_processor.py.")
-            
-            # Determine path to call_processor.py (assuming it's in the same directory as workflow_executor.py)
-            current_script_dir = Path(__file__).resolve().parent
-            path_to_call_processor_script = current_script_dir / "call_processor.py"
-
-            if not path_to_call_processor_script.is_file():
-                logger.error(f"call_processor.py not found at expected location: {path_to_call_processor_script}. Cannot proceed with call processing.")
-                return
-
-            call_processor_cmd_list = [
-                "python", str(path_to_call_processor_script),
-                "--input_run_dir", str(Path(args.output_dir).resolve()), 
-                "--output_call_dir", str(Path(args.final_call_output_dir).resolve()),
-                "--log_level", args.log_level 
-            ]
-            if args.cp_llm_model_id:
-                call_processor_cmd_list.extend(["--llm_model_id", args.cp_llm_model_id])
-            
-            try:
-                logger.info(f"Executing call_processor: {' '.join(call_processor_cmd_list)}")
-                process_env = os.environ.copy()
-                
-                completed_process = subprocess.run(
-                    call_processor_cmd_list, 
-                    capture_output=True, 
-                    text=True, 
-                    check=False, # Do not raise exception on non-zero exit code
-                    env=process_env,
-                    # cwd=str(current_script_dir) # Optional: Set CWD for the subprocess if needed
-                )
-                
-                if completed_process.returncode == 0:
-                    logger.info("call_processor.py executed successfully.")
-                    if completed_process.stdout:
-                        logger.debug(f"call_processor.py stdout:\n{completed_process.stdout}")
-                    if completed_process.stderr: # Log stderr even on success, as it might contain warnings
-                        logger.debug(f"call_processor.py stderr:\n{completed_process.stderr}")
-                else:
-                    logger.error(f"call_processor.py failed with return code {completed_process.returncode}")
-                    if completed_process.stdout:
-                        logger.error(f"call_processor.py stdout:\n{completed_process.stdout}")
-                    if completed_process.stderr:
-                        logger.error(f"call_processor.py stderr:\n{completed_process.stderr}")
-            except FileNotFoundError: 
-                logger.error(f"Failed to run call_processor.py: 'python' command or script '{path_to_call_processor_script}' not found. Ensure Python is in PATH and script exists.")
-            except Exception as e:
-                logger.error(f"An unexpected error occurred while trying to run call_processor.py: {e}", exc_info=True)
-        else:
-            # This 'else' branch is for when --final_call_output_dir is given, but --input_dir did not contain call-like files
-            if args.final_call_output_dir: # Ensure this log only appears if the user intended call processing
-                 logger.info(f"Input directory '{args.input_dir}' does not appear to be a call folder (no 'recv_out' or 'trans_out' files found). Skipping combined call processing step.")
-    else:
-        if args.input_dir and not args.final_call_output_dir:
-            logger.info("Processed all files in input_dir. --final_call_output_dir not specified, so skipping combined call processing step.")
-        elif not args.input_dir and args.final_call_output_dir:
-            logger.info("--final_call_output_dir was specified, but --input_dir was not. Combined call processing is only triggered when processing an input directory.")
+    # --- Always run combined call processing (final output) after all files are processed ---
+    # [REMOVED: All old final output logic will be replaced by the new final output builder.]
 
 if __name__ == "__main__":
     main() 

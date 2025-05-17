@@ -35,20 +35,29 @@ Finalize all core audio processing and output generation features, including rob
 
 ## Current Focus & Immediate Tasks
 
-1.  **LLM Model & Extensibility:**
+1.  **Final Output System Refactor (Top Priority):**
+    *   The new final output builder system is now in place:
+        - All calls are finalized (with optional tones appended to the end of each call audio).
+        - Soundbites are converted to MP3 with ID3 and JSON metadata.
+        - All LLM responses and transcripts are parsed and organized for each call.
+        - A show file (MP3) is built by concatenating the finalized call audios, with a show transcript and timestamps.
+        - Comprehensive metadata is written as a single JSON file, with all paths relative to the project root.
+        - The builder is now called unconditionally as the last step of the pipeline, ensuring a clean, user-facing output every time.
+        - Content moderation (censoring or flagging problematic content) and advanced labeling (using LLM tags for folder names, etc.) are planned next.
+2.  **LLM Model & Extensibility:**
     *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
     *   All LLM outputs (call name, synopsis, categories, and any user-defined tasks) are generated for every call/audio, with clear error reporting if LLM fails.
     *   LLM tag output is now a comma-separated list of plain English categories (not hashtags), as per new prompt.
     *   The LLM task system is now fully extensible and user-driven.
-2.  **Final Output Directory:**
+3.  **Final Output Directory:**
     *   The final output is now always written to `05_final_output/` in the main output directory, no user config needed.
     *   The LLM-generated call name is robustly used for the final output directory (quotes stripped, sanitized, fallback to call_id with clear logging).
     *   README and CLI now document `--input_file` for single-file workflows, and `--input_dir` for batch.
-3.  **MP3 Compression:**
+4.  **MP3 Compression:**
     *   MP3 compression for main audio is implemented; decision on soundbites pending.
-4.  **Show Compiler:**
+5.  **Show Compiler:**
     *   Next focus: test and validate the new LLM task system, then implement and test `show_compiler.py` for show-level aggregation.
-5.  **CLAP-Based Call Segmentation (Planned):**
+6.  **CLAP-Based Call Segmentation (Planned):**
     *   Design and implement rules-based segmentation using the new CLAP annotation output, with rules defined in the workflow config.
     *   Refactor pipeline to use the new integrated `clap_annotator.py`.
 
