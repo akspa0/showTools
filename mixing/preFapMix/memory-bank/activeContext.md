@@ -65,7 +65,20 @@ Finalize all core audio processing and output generation features, including rob
 
 ## Current Focus & Immediate Tasks
 
-1.  **Final Output System Refactor (Top Priority):**
+1.  **Diarization-Based Segmenting & Per-Segment Transcription (Top Priority):**
+    *   All transcription (Whisper and Parakeet) must use diarization-based segmenting: audio is always sliced into diarization-based segments (soundbites).
+    *   Each segment is transcribed individually using the selected ASR engine (Whisper or Parakeet).
+    *   Per-soundbite TXT and JSON files are created for each segment, both including timestamps (TXT: [start_time --> end_time]\ntext, JSON: all details including word-level timings if available).
+    *   The master transcript TXT is a concatenation of all segment texts (plain text only).
+    *   The master JSON contains all segment details, including timestamps, speaker, and word-level timings (if available).
+    *   The "full-audio" Parakeet transcription path is deprecated; all ASR is diarization-based, segment-by-segment.
+    *   This is now the top priority for implementation and testing.
+
+2.  **CLAP Segmentation Testing (Next Priority):**
+    *   The new CLAP segmentation/annotation system (using Hugging Face CLAP) is implemented but still needs thorough testing and validation.
+    *   Once diarization-based segmenting and per-segment transcription are robust, return to CLAP segmentation for further testing and integration.
+
+3.  **Final Output System Refactor (Top Priority):**
     *   The new final output builder system is now fully implemented and invoked unconditionally as the last step of the pipeline:
         - All calls are finalized (with optional tones appended to the end of each call audio).
         - Soundbites are converted to MP3 with ID3 and JSON metadata.
@@ -79,20 +92,20 @@ Finalize all core audio processing and output generation features, including rob
     *   **NEW:** All major scripts now include robust error handling and input validation for audio files: existence, non-zero size, and minimum duration (5s) are checked before processing. Invalid or too-short files are logged and skipped. This is now enforced in preFapMix.py, call_processor.py, final_output_builder.py, and character_ai_description_builder.py.
     *   **NEW:** Output folders are now renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output builders.
     *   **NEW:** 02_audio_preprocessing now contains four stems per call: <callname>_RECV_vocals.wav, <callname>_RECV_instrumental.wav, <callname>_TRANS_vocals.wav, <callname>_TRANS_instrumental.wav. The final output builder mixes these into a stereo MP3 with 20% panning left/right, preserving a 40% center soundstage. If only one leg is present, output is mono or single-channel stereo. This convention is now enforced and documented.
-2.  **LLM Model & Extensibility:**
+4.  **LLM Model & Extensibility:**
     *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
     *   All LLM outputs (call name, synopsis, categories, and any user-defined tasks) are generated for every call/audio, with clear error reporting if LLM fails.
     *   LLM tag output is now a comma-separated list of plain English categories (not hashtags), as per new prompt.
     *   The LLM task system is now fully extensible and user-driven.
-3.  **Final Output Directory:**
+5.  **Final Output Directory:**
     *   The final output is now always written to `05_final_output/` in the main output directory, no user config needed.
     *   The LLM-generated call name is robustly used for the final output directory (quotes stripped, sanitized, fallback to call_id with clear logging).
     *   README and CLI now document `--input_file` for single-file workflows, and `--input_dir` for batch.
-4.  **MP3 Compression:**
+6.  **MP3 Compression:**
     *   MP3 compression for main audio is implemented; decision on soundbites pending.
-5.  **Show Compiler:**
+7.  **Show Compiler:**
     *   Next focus: test and validate the new LLM task system, then implement and test `show_compiler.py` for show-level aggregation.
-6.  **CLAP-Based Call Segmentation (Planned):**
+8. **CLAP-Based Call Segmentation (Planned):**
     *   Design and implement rules-based segmentation using the new CLAP annotation output, with rules defined in the workflow config.
     *   Refactor pipeline to use the new integrated `clap_annotator.py`.
 

@@ -237,10 +237,9 @@ def _transcribe_and_create_soundbites(
                 logger.debug(f"[{pii_safe_file_prefix}] Saved final soundbite audio: {final_soundbite_audio_path}")
 
                 # Create the corresponding text file
-                timestamp_str = f"[{_format_timestamp(start_time_orig)} --> {_format_timestamp(end_time_orig)}]"
+                timestamp_str = f"{speaker_label} [{_format_timestamp(start_time_orig)} --> {_format_timestamp(end_time_orig)}]"
                 with open(final_soundbite_text_path, 'w', encoding='utf-8') as f_text:
-                    f_text.write(f"{timestamp_str}\\n")
-                    f_text.write(transcribed_text + "\\n")
+                    f_text.write(f"{timestamp_str}\n{transcribed_text}\n")
                 logger.debug(f"[{pii_safe_file_prefix}] Saved final soundbite text: {final_soundbite_text_path}")
                 
                 all_final_transcribed_segments.append({
@@ -281,77 +280,140 @@ def run_transcription(
     logger.info(f"[{pii_safe_file_prefix}] Using ASR engine: {asr_engine}")
     if asr_engine == 'parakeet':
         try:
-            # --- Streamlined Parakeet loader inspired by GLaDOS ---
-            try:
-                from nemo.collections.asr.models import EncDecRNNTBPEModel
-                class SimpleParakeetASR:
-                    def __init__(self, model_name="nvidia/parakeet-tdt-0.6b-v2", device=None):
-                        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-                        self.model = EncDecRNNTBPEModel.from_pretrained(model_name=model_name, map_location=self.device)
-                        self.model.eval()
-                    def transcribe(self, audio_path):
-                        # Returns a dict with 'text' and 'words' (if available)
-                        result = self.model.transcribe([audio_path], batch_size=1, return_hypotheses=True)[0]
-                        # result is a Hypothesis object; extract text and words
-                        text = getattr(result, 'text', None)
-                        words = getattr(result, 'words', None)
-                        # Convert words to list of dicts if present
-                        if words is not None and hasattr(words, '__iter__'):
-                            words = [w if isinstance(w, dict) or isinstance(w, str) or not hasattr(w, '__dict__') else w.__dict__ for w in words]
-                        return {"text": text, "words": words}
-                asr_model = SimpleParakeetASR()
-                logger.info(f"[{pii_safe_file_prefix}] Loaded SimpleParakeetASR model.")
-                result = asr_model.transcribe(vocal_stem_path)
-                transcript = result["text"]
-                out_txt = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.txt"
-                out_json = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.json"
-                with open(out_txt, 'w', encoding='utf-8') as f:
-                    f.write(transcript or "")
-                with open(out_json, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-                logger.info(f"[{pii_safe_file_prefix}] Parakeet transcript saved: {out_txt}, {out_json}")
-                return {
-                    'master_transcript_text_file': str(out_txt),
-                    'transcript_json_path': str(out_json),
-                    'transcript_file': str(out_json)
-                }
-            except Exception as e:
-                logger.warning(f"[{pii_safe_file_prefix}] SimpleParakeetASR loader failed, falling back to NeMo ASRModel: {e}")
-                import nemo.collections.asr as nemo_asr
-                asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
-                logger.info(f"[{pii_safe_file_prefix}] Loaded Parakeet TDT 0.6B V2 model (NeMo fallback).")
-                output = asr_model.transcribe([vocal_stem_path], timestamps=True)
-                transcript = output[0].text
-                out_txt = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.txt"
-                out_json = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.json"
-                with open(out_txt, 'w', encoding='utf-8') as f:
-                    f.write(transcript)
-                def tensor_to_serializable(obj):
-                    if isinstance(obj, torch.Tensor):
-                        if obj.ndim == 0:
-                            return obj.item()
-                        else:
-                            return obj.detach().cpu().tolist()
-                    elif isinstance(obj, dict):
-                        return {k: tensor_to_serializable(v) for k, v in obj.items()}
-                    elif isinstance(obj, list):
-                        return [tensor_to_serializable(v) for v in obj]
-                    elif hasattr(obj, '__dict__'):
-                        return tensor_to_serializable(obj.__dict__)
-                    else:
-                        return obj
-                serializable_output = tensor_to_serializable(output[0])
-                with open(out_json, 'w', encoding='utf-8') as f:
-                    json.dump(serializable_output, f, indent=2, ensure_ascii=False)
-                logger.info(f"[{pii_safe_file_prefix}] Parakeet transcript saved: {out_txt}, {out_json}")
-                return {
-                    'master_transcript_text_file': str(out_txt),
-                    'transcript_json_path': str(out_json),
-                    'transcript_file': str(out_json)
-                }
+            from nemo.collections.asr.models import EncDecRNNTBPEModel
+            class SimpleParakeetASR:
+                def __init__(self, model_name="nvidia/parakeet-tdt-0.6b-v2", device=None):
+                    self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+                    self.model = EncDecRNNTBPEModel.from_pretrained(model_name=model_name, map_location=self.device)
+                    self.model.eval()
+                def transcribe(self, audio_path):
+                    # Returns a dict with 'text' and 'words' (if available)
+                    result = self.model.transcribe([audio_path], batch_size=1, return_hypotheses=True)[0]
+                    text = getattr(result, 'text', None)
+                    words = getattr(result, 'words', None)
+                    if words is not None and hasattr(words, '__iter__'):
+                        words = [w if isinstance(w, dict) or isinstance(w, str) or not hasattr(w, '__dict__') else w.__dict__ for w in words]
+                    return {"text": text, "words": words}
+            asr_model = SimpleParakeetASR()
+            logger.info(f"[{pii_safe_file_prefix}] Loaded SimpleParakeetASR model.")
+
+            # --- Diarization-based segmenting and per-segment transcription ---
+            persistent_stage_output_dir = Path(output_dir_str)
+            persistent_stage_output_dir.mkdir(parents=True, exist_ok=True)
+            # Validate RTTM
+            if not diarization_file_path or not Path(diarization_file_path).exists():
+                logger.error(f"[{pii_safe_file_prefix}] Diarization RTTM file not found: {diarization_file_path}")
+                return {"error": "Diarization RTTM file not found", "transcript_json_path": None, "master_transcript_text_file": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
+            rttm_data = load_rttm(diarization_file_path)
+            if not rttm_data:
+                logger.error(f"[{pii_safe_file_prefix}] RTTM file loaded empty: {diarization_file_path}")
+                return {"error": "RTTM file loaded empty", "transcript_json_path": None, "master_transcript_text_file": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
+            first_key = list(rttm_data.keys())[0]
+            diarization_annotation = rttm_data[first_key]
+            if not isinstance(diarization_annotation, Annotation):
+                logger.error(f"[{pii_safe_file_prefix}] Invalid data type from RTTM (key: {first_key}): {type(diarization_annotation)}")
+                return {"error": "Invalid data from RTTM", "transcript_json_path": None, "master_transcript_text_file": None, "soundbite_speaker_dirs": [], "soundbite_output_base_dir": None}
+            logger.info(f"[{pii_safe_file_prefix}] RTTM loaded successfully (key: {first_key}).")
+
+            # --- Slicing ---
+            temp_dir = tempfile.TemporaryDirectory(prefix=f"{pii_safe_file_prefix}_parakeet_work_")
+            temp_slices_subdir = Path(temp_dir.name) / "initial_audio_slices"
+            temp_slices_subdir.mkdir(parents=True, exist_ok=True)
+            segment_info_for_transcription = _perform_slicing_with_merging_and_fades(
+                audio_file_path=vocal_stem_path,
+                diarization_annotation=diarization_annotation,
+                temp_output_dir_for_slices=temp_slices_subdir,
+                pii_safe_file_prefix=pii_safe_file_prefix,
+                min_segment_duration_s=config.get("min_segment_duration_s", 0.5),
+                merge_gap_s=config.get("merge_gap_s", 0.4),
+                fade_duration_ms=config.get("fade_duration_ms", 50)
+            )
+            final_transcribed_segments = []
+            for speaker_label, segments in segment_info_for_transcription.items():
+                if not segments: continue
+                speaker_final_output_dir = Path(output_dir_str) / speaker_label
+                speaker_final_output_dir.mkdir(parents=True, exist_ok=True)
+                for segment_data in segments:
+                    temp_slice_path_str = segment_data['temp_slice_path']
+                    temp_slice_path = Path(temp_slice_path_str)
+                    sequence_id = segment_data['sequence_id']
+                    start_time_orig = segment_data['start_time_orig']
+                    end_time_orig = segment_data['end_time_orig']
+                    if not temp_slice_path.exists():
+                        logger.warning(f"[{pii_safe_file_prefix}] Temporary audio slice file not found, skipping: {temp_slice_path_str}")
+                        continue
+                    try:
+                        result = asr_model.transcribe(str(temp_slice_path))
+                        transcribed_text = (result.get('text') or '').strip()
+                        words = result.get('words', [])
+                        # TXT: [start_time --> end_time]\ntext
+                        soundbite_base_name = f"{sequence_id:04d}_{_sanitize_filename(' '.join(transcribed_text.split()[:config.get('min_words_for_filename', 5)]))}"
+                        final_soundbite_audio_path = speaker_final_output_dir / f"{soundbite_base_name}.wav"
+                        final_soundbite_text_path = speaker_final_output_dir / f"{soundbite_base_name}.txt"
+                        final_soundbite_json_path = speaker_final_output_dir / f"{soundbite_base_name}.json"
+                        shutil.copy2(temp_slice_path, final_soundbite_audio_path)
+                        timestamp_str = f"{speaker_label} [{_format_timestamp(start_time_orig)} --> {_format_timestamp(end_time_orig)}]"
+                        with open(final_soundbite_text_path, 'w', encoding='utf-8') as f_text:
+                            f_text.write(f"{timestamp_str}\n{transcribed_text}\n")
+                        with open(final_soundbite_json_path, 'w', encoding='utf-8') as f_json:
+                            json.dump({
+                                "speaker": speaker_label,
+                                "start_time": start_time_orig,
+                                "end_time": end_time_orig,
+                                "text": transcribed_text,
+                                "words": words,
+                                "soundbite_audio_path": str(final_soundbite_audio_path.resolve()),
+                                "soundbite_text_path": str(final_soundbite_text_path.resolve()),
+                                "sequence_id": sequence_id
+                            }, f_json, indent=2, ensure_ascii=False)
+                        final_transcribed_segments.append({
+                            "speaker": speaker_label,
+                            "start_time": start_time_orig,
+                            "end_time": end_time_orig,
+                            "text": transcribed_text,
+                            "words": words,
+                            "soundbite_audio_path": str(final_soundbite_audio_path.resolve()),
+                            "soundbite_text_path": str(final_soundbite_text_path.resolve()),
+                            "sequence_id": sequence_id
+                        })
+                    except Exception as e:
+                        logger.error(f"[{pii_safe_file_prefix}] Error transcribing/saving soundbite for temp slice {temp_slice_path_str}: {e}", exc_info=True)
+            # Master outputs
+            output_transcript_json_path = Path(output_dir_str) / f"{pii_safe_file_prefix}_transcription.json"
+            with open(output_transcript_json_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "file_info": {
+                        "original_audio_path": str(vocal_stem_path),
+                        "rttm_file_path": str(diarization_file_path),
+                        "processing_date": datetime.now().isoformat(),
+                        "asr_engine": "parakeet"
+                    },
+                    "segments": final_transcribed_segments
+                }, f, indent=4, ensure_ascii=False)
+            master_transcript_txt_path = Path(output_dir_str) / f"{pii_safe_file_prefix}_master_transcript.txt"
+            with open(master_transcript_txt_path, 'w', encoding='utf-8') as f_txt:
+                for seg in final_transcribed_segments:
+                    speaker = seg.get('speaker', 'UNK')
+                    start = seg.get('start_time', 0.0)
+                    end = seg.get('end_time', 0.0)
+                    text = seg.get('text', '').strip()
+                    if text:
+                        f_txt.write(f"{speaker} [{_format_timestamp(start)} --> {_format_timestamp(end)}]: {text}\n")
+            temp_dir.cleanup()
+            soundbite_dirs = sorted(list(set([
+                str(Path(seg['soundbite_audio_path']).parent)
+                for seg in final_transcribed_segments if 'soundbite_audio_path' in seg
+            ])))
+            return {
+                "transcript_json_path": str(output_transcript_json_path) if output_transcript_json_path.exists() else None,
+                "master_transcript_text_file": str(master_transcript_txt_path) if master_transcript_txt_path.exists() else None,
+                "transcript_file": str(output_transcript_json_path) if output_transcript_json_path.exists() else None,
+                "soundbite_speaker_dirs": soundbite_dirs,
+                "soundbite_output_base_dir": str(Path(output_dir_str))
+            }
         except Exception as e:
             logger.error(f"[{pii_safe_file_prefix}] Parakeet ASR failed: {e}")
-            return {'transcript_txt_path': None, 'transcript_json_path': None, 'master_transcript_text_file': None, 'transcript_file': None}
+            return {'transcript_json_path': None, 'master_transcript_text_file': None, 'transcript_file': None, 'soundbite_speaker_dirs': [], 'soundbite_output_base_dir': None}
     # Default: Whisper
     if config is None: config = {}
     
@@ -465,22 +527,13 @@ def run_transcription(
     master_transcript_txt_path = persistent_stage_output_dir / f"{pii_safe_file_prefix}_master_transcript.txt"
     try:
         with open(master_transcript_txt_path, 'w', encoding='utf-8') as f_txt:
-            for i, segment_data in enumerate(final_transcribed_segments):
+            for segment_data in final_transcribed_segments:
                 speaker = segment_data.get('speaker', 'UNK')
-                start_s = segment_data.get('start_time', 0.0)
-                end_s = segment_data.get('end_time', 0.0)
+                start = segment_data.get('start_time', 0.0)
+                end = segment_data.get('end_time', 0.0)
                 text = segment_data.get('text', '').strip()
-                # Use sequence_id if available (e.g. from soundbite naming), otherwise use loop index
-                # Ensure sequence_id is an integer for formatting
-                raw_sequence_id = segment_data.get('sequence_id')
-                if isinstance(raw_sequence_id, str) and raw_sequence_id.isdigit():
-                    sequence_id_num = int(raw_sequence_id)
-                elif isinstance(raw_sequence_id, int):
-                    sequence_id_num = raw_sequence_id
-                else:
-                    sequence_id_num = i + 1 # Use 1-based index if not available or not numeric string
-                
-                f_txt.write(f"{sequence_id_num:04d} - {speaker}: [{start_s:.2f}s - {end_s:.2f}s] {text}\n\n")
+                if text:
+                    f_txt.write(f"{speaker} [{_format_timestamp(start)} --> {_format_timestamp(end)}]: {text}\n")
         logger.info(f"[{pii_safe_file_prefix}] Master transcript text file saved to: {master_transcript_txt_path}")
     except Exception as e:
         logger.error(f"[{pii_safe_file_prefix}] Error writing master transcript text file {master_transcript_txt_path}: {e}")
@@ -500,7 +553,8 @@ def run_transcription(
     
     return {
         "transcript_json_path": str(output_transcript_json_path) if output_transcript_json_path.exists() else None,
-        "master_transcript_txt_path": str(master_transcript_txt_path) if master_transcript_txt_path and master_transcript_txt_path.exists() else None,
+        "master_transcript_text_file": str(master_transcript_txt_path) if master_transcript_txt_path and master_transcript_txt_path.exists() else None,
+        "transcript_file": str(output_transcript_json_path) if output_transcript_json_path.exists() else None,
         "soundbite_speaker_dirs": soundbite_dirs,
         "soundbite_output_base_dir": str(persistent_stage_output_dir) # For call_processor to locate speaker folders
     }

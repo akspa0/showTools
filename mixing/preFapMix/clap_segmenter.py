@@ -28,9 +28,13 @@ class CLAPSegmenter:
             "-of", "default=noprint_wrappers=1:nokey=1", audio_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffprobe error: {result.stderr}")
-        return float(result.stdout.strip())
+        output = result.stdout.strip()
+        if result.returncode != 0 or not output or output == 'N/A':
+            raise RuntimeError(f"ffprobe error or invalid duration for file '{audio_path}':\n  Output: '{output}'\n  Stderr: '{result.stderr.strip()}'\n  Command: {' '.join(cmd)}")
+        try:
+            return float(output)
+        except ValueError:
+            raise RuntimeError(f"ffprobe returned non-numeric duration for file '{audio_path}':\n  Output: '{output}'\n  Stderr: '{result.stderr.strip()}'\n  Command: {' '.join(cmd)}")
 
     @staticmethod
     def extract_audio_chunk(input_path: str, output_path: str, start: float, duration: float):

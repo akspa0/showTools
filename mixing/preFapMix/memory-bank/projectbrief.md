@@ -23,6 +23,10 @@ The pipeline is designed to be extensible, maintainable, and safe for sensitive 
 - For processed paired calls, create a chronologically ordered "show" file, including a single concatenated MP3 audio of all calls, a timestamp file detailing the start of each call with its name, and a combined plain text transcript of all calls in the show.
 - Ensure all output filenames and directory structures are PII-safe, primarily using timestamp-based identifiers for intermediate files and sanitized LLM-generated names for final outputs where appropriate.
 - Generate complete conversation transcripts with accurate speaker attribution.
+- All transcription (Whisper and Parakeet) must use diarization-based segmenting: audio is always sliced into diarization-based segments (soundbites), and each segment is transcribed individually, with per-segment TXT/JSON outputs including timestamps.
+- Master transcript TXT is plain text; master JSON includes all segment details and timings.
+- The "full-audio" Parakeet transcription path is deprecated; all ASR is diarization-based, segment-by-segment.
+- CLAP segmentation (using Hugging Face CLAP) is a key feature for event detection and future rules-based segmentation, but is not the current top priority.
 
 ## LLM-Generated Content Requirements
 - **Purpose:** To provide concise, actionable insights and organizational metadata from transcribed audio content.

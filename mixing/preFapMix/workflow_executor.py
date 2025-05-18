@@ -714,8 +714,7 @@ def main():
     project_root = Path(__file__).resolve().parent
     output_dir = project_root / '05_final_output'
     output_dir.mkdir(parents=True, exist_ok=True)
-    processed_calls_dir = project_root / 'workspace' / 'processed_calls'
-    build_final_output(project_root, output_dir, processed_calls_dir=processed_calls_dir)
+    build_final_output(project_root, output_dir)
 
 if __name__ == "__main__":
     main() 

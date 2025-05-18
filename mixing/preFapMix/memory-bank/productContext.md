@@ -75,3 +75,8 @@ Processing multi-speaker audio recordings, especially paired call center data (`
 - CLAP segmentation allows the pipeline to process any long-form or non-call audio (e.g., podcasts, radio, meetings) by splitting it into logical segments based on detected events (e.g., tones, music, scene changes).
 - Each segment is treated as a virtual call, enabling independent analysis, transcription, and metadata generation.
 - This greatly expands the pipeline's applicability and value beyond call center data.
+
+- Users expect all transcription (Whisper and Parakeet) to be diarization-based, with each segment (soundbite) transcribed individually and per-segment TXT/JSON outputs including timestamps.
+- The master transcript TXT should be plain text; the master JSON should include all segment details and timings.
+- The "full-audio" Parakeet transcription path is deprecated; all ASR is diarization-based, segment-by-segment.
+- CLAP segmentation is important for future event-driven workflows, but the immediate focus is robust, segment-based ASR with timestamps.

@@ -1,6 +1,9 @@
 # Progress
 
 ## What Works
+- Whisper diarization-based segmenting and per-segment transcription (with soundbites and timestamps) is robust.
+- Parakeet transcription works for full audio, but segment-based logic is being implemented.
+- Pipeline output keys are now consistent for downstream stages.
 - Modular pipeline: CLAP, Preprocess, Diarize, Transcribe, LLM Summary all functional
 - Final output builder and Character.AI description generator are robust and compliant
 - Output folders are sanitized, unique, and cleaned up if under 192KB
@@ -21,6 +24,11 @@
 - Ongoing monitoring for output structure and naming issues
 
 ## Current Status
+- Diarization-based segmenting and per-segment transcription (Whisper/Parakeet) is now the top priority.
+- All transcription must use diarization-based segments, with per-segment TXT/JSON outputs including timestamps.
+- Master transcript TXT is plain text; master JSON includes all segment details and timings.
+- The Parakeet full-audio path is deprecated; all ASR is segment-based.
+- CLAP segmentation (Hugging Face CLAP) is implemented but still needs thorough testing.
 - Pipeline is robust, PII-safe, and user-facing
 - All major features are implemented and functional
 - Outstanding issues are mostly related to upstream pipeline structure

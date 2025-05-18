@@ -157,3 +157,11 @@ The system employs a multi-tier architecture to handle audio processing:
 - Output segments and metadata as before, but with a clean, testable, and maintainable codebase.
 - Remove all legacy CLAPAnnotatorWrapper/CLI/stem logic from segmentation.
 - Provide a minimal test script for validation.
+
+## Pattern: Diarization-Based ASR for All Engines
+- All ASR (Whisper and Parakeet) is performed on diarization-based segments (soundbites), not on the full audio.
+- Each segment is transcribed individually, and per-soundbite TXT and JSON files are created, both including timestamps.
+- The master transcript TXT is a concatenation of all segment texts (plain text only).
+- The master JSON contains all segment details, including timestamps, speaker, and word-level timings (if available).
+- The "full-audio" Parakeet transcription path is deprecated; all ASR is diarization-based, segment-by-segment.
+- CLAP segmentation is a modular, event-driven stage, but not the current top priority for pipeline robustness.
