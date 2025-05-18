@@ -41,6 +41,18 @@
 - **PII Safety:** Maintained through `pii_safe_file_prefix` in workflow stages and sanitized naming in `call_processor.py` outputs.
 - **Resolved Issues:** Previous terminal echo problem, initial LLM import/usage issues, and RTTM parsing issues are resolved. Soundbite generation in `transcription_module.py` and copying in `call_processor.py` are now working.
 
+### Final Output Builder
+- The final output builder is now fully implemented and invoked unconditionally as the last step of the pipeline.
+- It collects all call outputs, soundbites, LLM responses, transcripts, show files, and metadata, and zips the final output.
+- It marks bad calls, makes all paths relative, and supports a flat call folder for convenience.
+- All lineage, tagging, and extensibility requirements are met.
+- The output is robust, user-facing, and ready for further content moderation and UI integration.
+
+## Final Output Builder Redesign (May 2025)
+- The previous output builder was insufficient: it did not compile final call audio, did not robustly collect or name outputs, and did not produce a user-facing product.
+- A new, modular, and robust output builder is planned and requirements are confirmed.
+- Implementation will begin in a new session.
+
 ## What's Left to Build / Refine (Current Development Cycle)
 
 ### Current High Priority
@@ -64,6 +76,11 @@
     *   *If yes:* This would necessitate changes in `audio_preprocessor.py` (to save instrumental stems if not already), `call_processor.py` (to create a vocal+instrumental mix for each call to be placed in the `final_output_dir`), and `show_compiler.py` would then use this full mix as source.
     *   *If no (current assumption):* `show_compiler.py` uses the vocal-only MP3s from `final_output_dir`.
 - **Soundbites in "Final Output" Directory:** Are the individual soundbite folders (e.g., `RECV_S0/`) and their contents to be copied into the `final_output_dir/[Sanitized_Call_Name]/soundbites/` directory? If so, should these also be MP3 compressed?
+
+### Next Focus
+- Advanced content moderation (censoring or flagging problematic content)
+- Show-level LLM synopses
+- UI integration for LLM task management
 
 ### Broader Architectural Enhancements & Future Work (Next Development Cycle)
 - **Configuration File for LLM Server:** Introduce a `config/settings.json` to specify LM Studio URL, model, and parameters. Modify `llm_module.py` and its callers.

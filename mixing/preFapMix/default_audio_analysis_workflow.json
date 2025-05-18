@@ -11,7 +11,7 @@
                 "output_dir_str": "{workflow.current_stage_output_dir}"
             },
             "config": {
-                "clap_prompts": ["telephone ringing", "telephone hang-up tones", "dtmf tones"],
+                "clap_prompts": ["telephone ringing", "telephone hang-up tones"],
                 "clap_confidence_threshold": 0.6,
                 "clap_separator_model": null
             },
@@ -28,8 +28,8 @@
                 "base_output_dir_str": "{workflow.current_stage_output_dir}"
             },
             "config": {
-                "target_sr_hz": 16000,
-                "vocals_lufs": -3.0,
+                "target_sr_hz": 44100,
+                "vocals_lufs": -16.0,
                 "instrumental_lufs": -14.0,
                 "audio_separator_model": "UVR_MDXNET_Main" 
             },
@@ -67,23 +67,56 @@
                 "min_slice_duration_ms": 500
             },
             "outputs": {
-                "transcript_file": "return_value[transcript_json_path]"
+                "transcript_file": "return_value[transcript_json_path]",
+                "master_transcript_text_file": "return_value[master_transcript_txt_path]"
             }
         },
         {
             "stage_name": "llm_summary_and_analysis",
             "module": "llm_module",
-            "function": "run_llm_summary",
+            "function": "run_llm_tasks",
             "inputs": {
-                "transcript_file_path": "{stages.transcription[transcript_file]}",
+                "transcript_file_path": "{stages.transcription[master_transcript_text_file]}",
                 "clap_events_file_path": "{stages.clap_event_annotation[clap_events_file]}",
                 "diarization_file_path": "{stages.speaker_diarization[rttm_file]}",
                 "output_dir_str": "{workflow.current_stage_output_dir}"
             },
             "config": {
-                "lm_studio_model_identifier": "nidum-gemma-3-4b-it-uncensored"
+                "llm_tasks": [
+                    {
+                        "name": "call_title",
+                        "prompt_template": "TITLE: [Return a single, witty, PII-safe title for the call, no more than 12 words. Do not include punctuation or extra commentary.] Transcript:\n{transcript}",
+                        "output_file": "call_title.txt"
+                    },
+                    {
+                        "name": "call_synopsis",
+                        "prompt_template": "SYNOPSIS: [A very brief (1-3 sentences) factual summary of the conversation's main points, delivered with a lighthearted or witty tone. Stick strictly to the transcript content.]\nTranscript:\n{transcript}",
+                        "output_file": "call_synopsis.txt"
+                    },
+                    {
+                        "name": "call_categories",
+                        "prompt_template": "CATEGORIES: [A comma-separated list of 2-5 simple, human-readable categories that best describe the content of the call or audio. Examples: comedy, family, adult content, customer service, complaint, technical support, prank call, etc. Do NOT use hashtags or Twitter formatting. Output only the comma-separated list.]\nTranscript:\n{transcript}",
+                        "output_file": "call_categories.txt"
+                    },
+                    {
+                        "name": "sdxl_image_prompt",
+                        "prompt_template": "IMAGE PROMPT: [Write a detailed, creative prompt for a Stable Diffusion XL (SDXL) model to generate an image that visually represents the scene or mood of this call. Be vivid, avoid text overlays, and focus on the main themes.]\nTranscript:\n{transcript}",
+                        "output_file": "sdxl_image_prompt.txt"
+                    },
+                    {
+                        "name": "silly_song",
+                        "prompt_template": "SONG: [Write a short, silly song about the events or characters in this call. Make it fun and lighthearted, and keep it under 8 lines.]\nTranscript:\n{transcript}",
+                        "output_file": "silly_song.txt"
+                    }
+                ],
+                "lm_studio_model_identifier": "llama-3.1-8b-supernova-etherealhermes",
+                "lm_studio_base_url": "http://192.168.1.131:1234/v1",
+                "lm_studio_api_key": "lm-studio",
+                "lm_studio_temperature": 0.5,
+                "lm_studio_max_tokens": 250
             },
             "outputs": {
+                "llm_outputs": "return_value[llm_outputs]",
                 "summary_file": "return_value[summary_text_file_path]"
             }
         }

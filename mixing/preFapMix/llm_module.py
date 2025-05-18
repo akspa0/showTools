@@ -158,7 +158,9 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
     import logging
     logger = logging.getLogger("llm_module")
     from openai import OpenAI
-    
+    from pathlib import Path
+    import json
+
     # Resolve output directory
     if output_dir is None and output_dir_str is not None:
         output_dir = Path(output_dir_str)
@@ -168,7 +170,22 @@ def run_llm_tasks(transcript_file_path, config, output_dir=None, output_dir_str=
         raise ValueError("run_llm_tasks: Must provide output_dir or output_dir_str.")
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"[LLM Tasks] Using output directory: {output_dir}")
-    
+
+    # Gracefully handle missing transcript file
+    if not transcript_file_path or not Path(transcript_file_path).exists():
+        logger.warning(f"[LLM Tasks] Transcript file is missing or None: {transcript_file_path}. Skipping LLM tasks.")
+        # Write an error file for each expected LLM output
+        llm_tasks = config.get('llm_tasks', [])
+        output_paths = {}
+        for task in llm_tasks:
+            name = task.get('name', 'unnamed_task')
+            output_file = task.get('output_file', f'{name}.txt')
+            out_path = os.path.join(output_dir, output_file)
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(f"Error: Transcript file not found at {transcript_file_path}")
+            output_paths[name] = out_path
+        return {"llm_outputs": output_paths, "summary_text_file_path": None, "error": f"Transcript file not found at {transcript_file_path}"}
+
     # Load transcript
     with open(transcript_file_path, 'r', encoding='utf-8') as f:
         transcript = f.read()

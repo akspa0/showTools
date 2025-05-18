@@ -36,14 +36,17 @@ Finalize all core audio processing and output generation features, including rob
 ## Current Focus & Immediate Tasks
 
 1.  **Final Output System Refactor (Top Priority):**
-    *   The new final output builder system is now in place:
+    *   The new final output builder system is now fully implemented and invoked unconditionally as the last step of the pipeline:
         - All calls are finalized (with optional tones appended to the end of each call audio).
         - Soundbites are converted to MP3 with ID3 and JSON metadata.
         - All LLM responses and transcripts are parsed and organized for each call.
         - A show file (MP3) is built by concatenating the finalized call audios, with a show transcript and timestamps.
         - Comprehensive metadata is written as a single JSON file, with all paths relative to the project root.
-        - The builder is now called unconditionally as the last step of the pipeline, ensuring a clean, user-facing output every time.
-        - Content moderation (censoring or flagging problematic content) and advanced labeling (using LLM tags for folder names, etc.) are planned next.
+        - The builder always produces a robust, user-facing output folder with all required files, metadata, and a zipped archive.
+        - All lineage, tagging, and extensibility requirements are met.
+        - Content moderation (censoring or flagging problematic content), show-level LLM synopses, and UI integration for LLM tasks are the next focus.
+    *   **NEW:** Output cleanup logic is now implemented in character_ai_description_builder.py: any call output folder under 192KB is automatically deleted after processing. This reduces clutter from empty or failed LLM runs. This logic is now also implemented in the final output builder.
+    *   **NEW:** Output folders are now renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output builders.
 2.  **LLM Model & Extensibility:**
     *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
     *   All LLM outputs (call name, synopsis, categories, and any user-defined tasks) are generated for every call/audio, with clear error reporting if LLM fails.
@@ -67,6 +70,9 @@ Finalize all core audio processing and output generation features, including rob
     *   Model is now `llama-3.1-8b-supernova-etherealhermes`.
     *   Final output directory naming is robust to LLM output quirks (quotes, empty, etc.).
     *   Logging improved for debugging naming issues.
+*   **Output Cleanup & Naming:**
+    *   Output folders under 192KB are now deleted after LLM processing in both character_ai_description_builder.py and final_output_builder.py. This helps keep results clean and removes empty/bad call folders.
+    *   Output folders are now renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output builders.
 *   **Documentation:**
     *   README and CLI usage updated for clarity and modern workflow.
     *   LLM extensibility and prompt templating now documented.
@@ -92,3 +98,19 @@ Finalize all core audio processing and output generation features, including rob
 
 *   Should soundbites in the `final_output_dir/[call_name]/soundbites/` also be MP3 compressed? (Assuming soundbites are planned to be copied there eventually).
 *   Does the `show_audio.mp3` need to include instrumental stems, or is the current vocal-only mix from `call_processor.py` (i.e., `mixed_vocals.wav`) the correct source?
+
+## Final Output Builder Redesign (May 2025)
+- The final output builder is being completely redesigned.
+- The new design will:
+  - Recursively discover all processed call folders in the workflow output tree.
+  - For each call:
+    - Extract and sanitize the LLM-generated call title (remove punctuation, limit to 8 words, fallback to call_id), append timestamp.
+    - Locate or build the final mixed audio (mix vocals + instrumental at 50% if needed), compress to MP3, tag with full metadata, and place in the root output folder.
+    - Copy all transcript files to Transcriptions/<CallName>/.
+    - Copy/convert all soundbites to MP3, organize by speaker in Soundbites/<CallName>/.
+    - Copy all LLM outputs and metadata to Metadata/<CallName>/.
+  - Write final_output_metadata.json and bad_calls.txt.
+  - Zip the output folder.
+  - Add robust logging and error handling.
+- The output structure will be flat, user-facing, and future-proof, with all calls in the root and supporting folders for transcripts, soundbites, and metadata.
+- This will be implemented in a new session.

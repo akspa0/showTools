@@ -613,8 +613,14 @@ def main():
 
     logger.info(f"All individual file workflow executions complete. Overall success: {all_workflows_succeeded}")
 
-    # --- Always run combined call processing (final output) after all files are processed ---
-    # [REMOVED: All old final output logic will be replaced by the new final output builder.]
+    # --- Always run the final output builder as the last step ---
+    from final_output_builder import FinalOutputBuilder
+    project_root = Path(__file__).resolve().parent
+    output_dir = project_root / '05_final_output'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    processed_calls_dir = project_root / 'workspace' / 'processed_calls'
+    builder = FinalOutputBuilder(project_root, output_dir, processed_calls_dir=processed_calls_dir)
+    builder.run()
 
 if __name__ == "__main__":
     main() 

@@ -46,6 +46,11 @@ The system employs a multi-tier architecture to handle audio processing:
         *   Uses `ffmpeg` for audio concatenation and potentially final MP3 compression if sources are WAV.
         *   Parses call durations and individual plain text transcripts to generate metadata files.
 
+4.  **`final_output_builder.py` (Final Output Tier):**
+    *   **Responsibility:** Always invoked as the last step of the pipeline, it collects all call outputs, soundbites, LLM responses, transcripts, show files, and metadata, and zips the final output.
+    *   **Output:** Produces a robust, user-facing output folder with all required files, metadata, and a zipped archive. Marks bad calls, makes all paths relative, and supports a flat call folder for convenience. All lineage, tagging, and extensibility requirements are met.
+    *   **Next Focus:** Advanced content moderation, show-level LLM synopses, and UI integration for LLM tasks.
+
 ## Key Design Patterns & Principles
 *   Modular Design: Core tasks in specialized modules.
 *   Configuration-Driven Workflow: `workflow_executor.py` uses JSON configs.
@@ -116,3 +121,10 @@ The system employs a multi-tier architecture to handle audio processing:
 *   Dependency Management (`requirements.txt`, system `ffmpeg`).
 *   Resource Usage (CPU, GPU, RAM for various stages).
 *   Model Management (downloading/caching for diarization, transcription, separation).
+
+## Pattern: Final Output Builder (2025 Redesign)
+- Must always use LLM-generated, sanitized, timestamped names for all calls and files.
+- Place all final MP3s in the root of the output folder.
+- Organize all supporting data in single, flat subfolders by call.
+- Carry over and tag all metadata.
+- Be robust to missing data and always produce a complete report.
