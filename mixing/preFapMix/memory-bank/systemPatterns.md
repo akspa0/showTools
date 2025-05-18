@@ -128,3 +128,32 @@ The system employs a multi-tier architecture to handle audio processing:
 - Organize all supporting data in single, flat subfolders by call.
 - Carry over and tag all metadata.
 - Be robust to missing data and always produce a complete report.
+
+## Architecture
+- Modular pipeline: CLAP → Preprocess → Diarize → Transcribe → LLM Summary/Metadata.
+- Each stage is a separate, robust script/module with clear inputs/outputs.
+
+## Naming Conventions
+- All output folders and files are sanitized for PII and filesystem safety.
+- Stems are named as <callname>_RECV_vocals.wav, etc., to preserve channel/leg info.
+- Output folders are renamed using sanitized call names from LLM output, with uniqueness enforced.
+
+## Error Handling
+- All scripts use robust error handling and logging at every stage.
+- Checks for file existence, size, and minimum duration are enforced.
+
+## Output Folder Cleanup
+- Any output folder under 192KB is deleted as part of cleanup.
+- Only folders with meaningful content are kept for user-facing output.
+
+## Extensibility
+- New ASR engines or LLM endpoints can be added with minimal changes to the pipeline.
+
+## CLAP Segmentation Pattern
+- **Canonical:** Use Hugging Face transformers CLAP model and processor directly on the original audio.
+- Run all prompts in one pass, collect detection scores per prompt and chunk.
+- Implement robust event pairing and bookend logic for segmentation.
+- Use ffmpeg/ffprobe for all audio I/O (duration, segment extraction).
+- Output segments and metadata as before, but with a clean, testable, and maintainable codebase.
+- Remove all legacy CLAPAnnotatorWrapper/CLI/stem logic from segmentation.
+- Provide a minimal test script for validation.

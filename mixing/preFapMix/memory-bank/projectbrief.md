@@ -1,4 +1,17 @@
-# PreFapMix Project Brief
+# Project Brief
+
+This project is a robust, modular audio processing pipeline designed for call recordings. Its core requirements are:
+
+- **PII-safe output**: All outputs are sanitized for privacy and compliance.
+- **User-facing, future-proof structure**: Output folders are flat, sanitized, and organized for end users.
+- **Stereo mixing**: Final MP3s are mixed from vocal and instrumental stems, with correct panning and volume.
+- **Soundbite extraction**: Per-speaker soundbites are generated, with ID3 tags and content-derived filenames.
+- **LLM-based metadata**: Summaries, titles, and other metadata are generated using LLMs, with flexible backend selection.
+- **Robust error handling and logging**: All scripts are designed for reliability and traceability.
+- **Flexible ASR backend**: Supports both Whisper and NVIDIA Parakeet TDT 0.6B V2, selectable via CLI/config.
+- **Modular pipeline**: Each stage (CLAP, Preprocess, Diarize, Transcribe, LLM) is a separate, robust module.
+
+The pipeline is designed to be extensible, maintainable, and safe for sensitive data.
 
 ## Core Requirements
 - Process audio files (often 8kHz per channel) for transcription, PII-safe storage, and analysis.
@@ -34,4 +47,11 @@
 - Ensure all intermediate and final outputs are organized logically and named in a PII-safe manner.
 
 ## Future Enhancements
-- **Utilize Structured JSON Transcripts:** Leverage the detailed, structured JSON output from the transcription stage (containing word-level timestamps and granular segment data) for more advanced LLM tasks. This could include creating highly detailed, chronologically accurate show-level synopses by combining multiple call transcripts, enabling fine-grained Q&A about *when* specific things were said, improving event correlation, and providing richer data for potential LLM fine-tuning in the future. 
+- **Utilize Structured JSON Transcripts:** Leverage the detailed, structured JSON output from the transcription stage (containing word-level timestamps and granular segment data) for more advanced LLM tasks. This could include creating highly detailed, chronologically accurate show-level synopses by combining multiple call transcripts, enabling fine-grained Q&A about *when* specific things were said, improving event correlation, and providing richer data for potential LLM fine-tuning in the future.
+
+## CLAP-Based Segmentation
+- The pipeline supports CLAP-based segmentation for all input audio, not just phone calls.
+- CLAP event annotation is used to detect boundaries (e.g., ringing, tones, music, scene changes) and split audio into logical segments.
+- Each segment is processed as a separate "call" through the full pipeline (preprocessing, diarization, transcription, LLM, etc.).
+- Segmentation is configurable (prompts, min/max segment length, overlap, etc.) and robust to different audio types.
+- This enables the pipeline to handle podcasts, radio, long recordings, and arbitrary audio, not just call center data. 

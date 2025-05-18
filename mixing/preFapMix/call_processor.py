@@ -7,6 +7,7 @@ import subprocess # Added for ffmpeg
 import json # Added for transcript merging
 from pathlib import Path
 from datetime import datetime # Will be needed for parsing timestamps if not in filenames
+from pydub.utils import mediainfo
 
 # Attempt to import the LLM module function.
 # This is a placeholder and might need adjustment based on actual project structure and PYTHONPATH.
@@ -431,6 +432,22 @@ def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path, call_id_for_logging: str
         return False
 
 
+def is_valid_audio(file_path, min_duration_sec=5):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logger.error(f"File does not exist or is empty: {file_path}")
+        return False
+    try:
+        info = mediainfo(file_path)
+        duration = float(info.get('duration', 0))
+        if duration < min_duration_sec:
+            logger.error(f"File too short (<{min_duration_sec}s): {file_path} (duration: {duration:.2f}s)")
+            return False
+    except Exception as e:
+        logger.error(f"Could not get audio info for {file_path}: {e}")
+        return False
+    return True
+
+
 def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, config: dict):
     """
     Processes a single call (which could be a pair or a single stream).
@@ -482,8 +499,28 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         trans_run_dir = job_details["trans_run_dir"]
         logger.info(f"[{call_id}] Processing as PAIR. RECV_DIR: {recv_run_dir.name}, TRANS_DIR: {trans_run_dir.name}")
 
+        # Locate audio_preprocessing stage folders for each leg
+        recv_audio_pre_dir = next((d for d in recv_run_dir.iterdir() if d.is_dir() and AUDIO_PREPROCESSING_STAGE_KEYWORD in d.name), None)
+        trans_audio_pre_dir = next((d for d in trans_run_dir.iterdir() if d.is_dir() and AUDIO_PREPROCESSING_STAGE_KEYWORD in d.name), None)
+        if not recv_audio_pre_dir or not trans_audio_pre_dir:
+            logger.warning(f"[{call_id}] Could not find audio_preprocessing stage folder for one or both legs. RECV: {recv_audio_pre_dir}, TRANS: {trans_audio_pre_dir}")
+        else:
+            # Save/copy stems with explicit channel/leg suffixes
+            for leg, audio_pre_dir in [("RECV", recv_audio_pre_dir), ("TRANS", trans_audio_pre_dir)]:
+                for stem_type in ["vocals_normalized.wav", "instrumental_normalized.wav"]:
+                    src = audio_pre_dir / stem_type
+                    if src.exists():
+                        out_name = f"{call_id}_{leg}_{stem_type}"
+                        dst = audio_pre_dir / out_name
+                        shutil.copy2(src, dst)
+                        logger.info(f"[{call_id}] Saved/copy stem: {dst}")
+
+        # Always use stems from audio_preprocessing for mixing
+        recv_vocal_stem_path = recv_audio_pre_dir / VOCAL_STEM_FILENAME if recv_audio_pre_dir else None
+        trans_vocal_stem_path = trans_audio_pre_dir / VOCAL_STEM_FILENAME if trans_audio_pre_dir else None
+        logger.info(f"[{call_id}] Using stems for mixing: RECV: {recv_vocal_stem_path}, TRANS: {trans_vocal_stem_path}")
+
         # Locate and copy/process RECV stream files
-        recv_vocal_stem_path = _find_output_file(recv_run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
         recv_transcript_path = _find_output_file(recv_run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
         recv_summary_path = _find_output_file(recv_run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
         if recv_summary_path:
@@ -491,28 +528,36 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         _copy_soundbite_directories(recv_run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, "RECV", call_id)
 
         # Locate and copy/process TRANS stream files
-        trans_vocal_stem_path = _find_output_file(trans_run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
         trans_transcript_path = _find_output_file(trans_run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
         trans_summary_path = _find_output_file(trans_run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
         if trans_summary_path:
             shutil.copy2(trans_summary_path, call_output_dir / f"{call_id}_trans_stream_summary.txt")
         _copy_soundbite_directories(trans_run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, "TRANS", call_id)
 
-        # Mix Vocals
+        # Mix Vocals (only if both are present)
         if recv_vocal_stem_path and trans_vocal_stem_path:
             mixed_vocals_output_path = call_output_dir / f"{call_id}_{MIXED_VOCALS_FILENAME}"
             _mix_stereo_vocals(recv_vocal_stem_path, trans_vocal_stem_path, mixed_vocals_output_path, call_id)
         else:
-            logger.warning(f"[{call_id}] Could not mix vocals as one or both vocal stems are missing.")
+            logger.warning(f"[{call_id}] Could not mix vocals as one or both vocal stems are missing. RECV: {bool(recv_vocal_stem_path)}, TRANS: {bool(trans_vocal_stem_path)}")
 
-        # Merge Transcripts
+        # Merge Transcripts (only if both are present)
         merged_transcript_path = None
         if recv_transcript_path and trans_transcript_path:
             merged_transcript_output_path = call_output_dir / f"{call_id}_{MERGED_TRANSCRIPT_FILENAME}"
             if _merge_transcripts(recv_transcript_path, trans_transcript_path, merged_transcript_output_path, call_id):
                 merged_transcript_path = merged_transcript_output_path
         else:
-            logger.warning(f"[{call_id}] Could not merge transcripts as one or both transcript files are missing.")
+            logger.warning(f"[{call_id}] Could not merge transcripts as one or both transcript files are missing. RECV: {bool(recv_transcript_path)}, TRANS: {bool(trans_transcript_path)}")
+            # Still copy available transcript(s) for downstream use
+            if recv_transcript_path:
+                shutil.copy2(recv_transcript_path, call_output_dir / f"{call_id}_RECV_{TRANSCRIPT_FILENAME}")
+                logger.info(f"[{call_id}] Copied RECV transcript for downstream use.")
+            if trans_transcript_path:
+                shutil.copy2(trans_transcript_path, call_output_dir / f"{call_id}_TRANS_{TRANSCRIPT_FILENAME}")
+                logger.info(f"[{call_id}] Copied TRANS transcript for downstream use.")
+            # Set merged_transcript_path to whichever is available for LLM (prefer RECV)
+            merged_transcript_path = recv_transcript_path or trans_transcript_path
 
     elif job_details["type"].startswith("single") or job_details["type"] == "single_audio":
         run_dir = job_details["run_dir"]
@@ -521,21 +566,35 @@ def process_call(call_id: str, job_details: dict, output_call_base_dir: Path, co
         if is_regular_audio or job_details["type"] == "single_audio":
             stream_type = "audio" # Use a neutral stream type for non-call files
         logger.info(f"[{call_id}] Processing as {job_details['type'].upper()}. DIR: {run_dir.name}")
-        vocal_stem_path = _find_output_file(run_dir, AUDIO_PREPROCESSING_STAGE_KEYWORD, VOCAL_STEM_FILENAME, call_id)
-        transcript_path = _find_output_file(run_dir, TRANSCRIPTION_STAGE_KEYWORD, TRANSCRIPT_FILENAME, call_id)
-        summary_path = _find_output_file(run_dir, LLM_SUMMARY_STAGE_KEYWORD, SUMMARY_FILENAME, call_id)
-        # Copy vocal stem (will be mono)
-        if vocal_stem_path:
-            shutil.copy2(vocal_stem_path, call_output_dir / f"{call_id}_{stream_type}_{VOCAL_STEM_FILENAME}")
+        audio_pre_dir = next((d for d in run_dir.iterdir() if d.is_dir() and AUDIO_PREPROCESSING_STAGE_KEYWORD in d.name), None)
+        if audio_pre_dir:
+            for stem_type in ["vocals_normalized.wav", "instrumental_normalized.wav"]:
+                src = audio_pre_dir / stem_type
+                if src.exists():
+                    out_name = f"{call_id}_{stream_type.upper()}_{stem_type}"
+                    dst = audio_pre_dir / out_name
+                    shutil.copy2(src, dst)
+                    logger.info(f"[{call_id}] Saved/copy stem: {dst}")
         # Use transcript as the "merged" transcript for LLM processing
         merged_transcript_path = None
-        if transcript_path:
-            target_transcript_path = call_output_dir / f"{call_id}_{stream_type}_{TRANSCRIPT_FILENAME}"
-            shutil.copy2(transcript_path, target_transcript_path)
-            merged_transcript_path = target_transcript_path # For LLM functions
+        if audio_pre_dir:
+            for stem_type in ["vocals_normalized.wav", "instrumental_normalized.wav"]:
+                src = audio_pre_dir / stem_type
+                if src.exists():
+                    out_name = f"{call_id}_{stream_type.upper()}_{stem_type}"
+                    dst = audio_pre_dir / out_name
+                    shutil.copy2(src, dst)
+                    logger.info(f"[{call_id}] Saved/copy stem: {dst}")
+            merged_transcript_path = audio_pre_dir / f"{call_id}_{stream_type.upper()}_vocals_normalized.wav"
             logger.info(f"[{call_id}] Using single stream transcript for LLM: {merged_transcript_path}")
-        if summary_path:
-            shutil.copy2(summary_path, call_output_dir / f"{call_id}_{stream_type}_stream_summary.txt")
+        if audio_pre_dir:
+            for stem_type in ["vocals_normalized.wav", "instrumental_normalized.wav"]:
+                src = audio_pre_dir / stem_type
+                if src.exists():
+                    out_name = f"{call_id}_{stream_type.upper()}_{stem_type}"
+                    dst = audio_pre_dir / out_name
+                    shutil.copy2(src, dst)
+                    logger.info(f"[{call_id}] Saved/copy stem: {dst}")
         # For non-call audio, use a more appropriate prefix than "RECV_" or "TRANS_"
         speaker_prefix = "SPEAKER_" if is_regular_audio or job_details["type"] == "single_audio" else stream_type.upper()
         _copy_soundbite_directories(run_dir, TRANSCRIPTION_STAGE_KEYWORD, call_output_dir, speaker_prefix, call_id)

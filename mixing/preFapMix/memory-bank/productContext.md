@@ -1,4 +1,26 @@
-# Product Context for PreFapMix
+# Product Context
+
+## Why This Project Exists
+
+Organizations and individuals need to process call recordings for insights, compliance, and user-facing applications, while ensuring privacy and future-proofing. This pipeline solves the problem of extracting meaningful, PII-safe, and well-organized outputs from raw call audio.
+
+## Problems Solved
+- Ensures all outputs are sanitized and PII-safe.
+- Provides a flat, user-friendly output structure for easy access and archiving.
+- Automates extraction of soundbites, transcripts, and LLM-generated metadata.
+- Supports robust error handling and logging for reliability.
+- Allows flexible selection of ASR/transcription backend.
+
+## How It Should Work
+- User provides a call recording (file or URL).
+- Pipeline processes audio through modular stages: CLAP event detection, preprocessing, diarization, transcription, LLM summary/metadata.
+- Outputs are organized in a flat, sanitized folder structure, with all relevant files (final mix, soundbites, transcripts, metadata) easily accessible.
+- Output folders are cleaned up if under a minimum size, ensuring only meaningful results are kept.
+
+## User Experience Goals
+- Outputs are easy to find, understand, and use.
+- All files are named and organized for clarity and privacy.
+- The system is robust to errors and edge cases, with clear logs for troubleshooting.
 
 ## Problem Statement
 
@@ -48,3 +70,8 @@ Processing multi-speaker audio recordings, especially paired call center data (`
 *   Content analysts and creators who need to review and extract information from audio recordings.
 *   Compliance officers needing to review call data.
 *   Anyone needing to process, understand, organize, and efficiently review multi-speaker audio recordings.
+
+## CLAP Segmentation Context
+- CLAP segmentation allows the pipeline to process any long-form or non-call audio (e.g., podcasts, radio, meetings) by splitting it into logical segments based on detected events (e.g., tones, music, scene changes).
+- Each segment is treated as a virtual call, enabling independent analysis, transcription, and metadata generation.
+- This greatly expands the pipeline's applicability and value beyond call center data.

@@ -7,6 +7,7 @@ from llm_module import generate_llm_summary  # Assumes same interface as main sc
 from pydub import AudioSegment
 import tempfile
 import string
+from pydub.utils import mediainfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,6 +42,8 @@ def create_audio_clips(speaker_dir: Path, out_dir: Path, speaker_label: str):
         combined = AudioSegment.empty()
         total_ms = 0
         for wav_file in soundbites:
+            if not is_valid_audio(wav_file):
+                continue
             seg = AudioSegment.from_wav(wav_file)
             if total_ms + len(seg) > target_sec * 1000:
                 seg = seg[:max(0, target_sec * 1000 - total_ms)]
@@ -56,6 +59,21 @@ def create_audio_clips(speaker_dir: Path, out_dir: Path, speaker_label: str):
         logging.info(f"Wrote {target_sec}s audio clip for {speaker_label} at {out_mp3}")
         if total_ms < target_sec * 1000:
             logging.warning(f"{speaker_label}: Only {total_ms/1000:.1f}s available for {target_sec}s clip.")
+
+def is_valid_audio(file_path, min_duration_sec=5):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"File does not exist or is empty: {file_path}")
+        return False
+    try:
+        info = mediainfo(file_path)
+        duration = float(info.get('duration', 0))
+        if duration < min_duration_sec:
+            logging.error(f"File too short (<{min_duration_sec}s): {file_path} (duration: {duration:.2f}s)")
+            return False
+    except Exception as e:
+        logging.error(f"Could not get audio info for {file_path}: {e}")
+        return False
+    return True
 
 # Main processing function
 def build_character_ai_descriptions(input_root: Path, output_root: Path, llm_model: str, llm_endpoint: str):

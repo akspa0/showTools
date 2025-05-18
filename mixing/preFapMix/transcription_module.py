@@ -271,11 +271,88 @@ def run_transcription(
     config: dict = None
 ):
     """
-    Performs transcription using Whisper, guided by Pyannote diarization.
+    Performs transcription using Whisper (default) or Parakeet TDT 0.6B V2 (if asr_engine=='parakeet'), guided by Pyannote diarization.
     Outputs a JSON file containing the full transcript with speaker labels and timestamps.
     Also outputs individual .wav and .txt soundbites per speaker segment into speaker-specific subdirs.
-    This version incorporates segment merging and audio fades inspired by WhisperBite.
     """
+    asr_engine = 'whisper'
+    if config and 'asr_engine' in config:
+        asr_engine = config['asr_engine']
+    logger.info(f"[{pii_safe_file_prefix}] Using ASR engine: {asr_engine}")
+    if asr_engine == 'parakeet':
+        try:
+            # --- Streamlined Parakeet loader inspired by GLaDOS ---
+            try:
+                from nemo.collections.asr.models import EncDecRNNTBPEModel
+                class SimpleParakeetASR:
+                    def __init__(self, model_name="nvidia/parakeet-tdt-0.6b-v2", device=None):
+                        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+                        self.model = EncDecRNNTBPEModel.from_pretrained(model_name=model_name, map_location=self.device)
+                        self.model.eval()
+                    def transcribe(self, audio_path):
+                        # Returns a dict with 'text' and 'words' (if available)
+                        result = self.model.transcribe([audio_path], batch_size=1, return_hypotheses=True)[0]
+                        # result is a Hypothesis object; extract text and words
+                        text = getattr(result, 'text', None)
+                        words = getattr(result, 'words', None)
+                        # Convert words to list of dicts if present
+                        if words is not None and hasattr(words, '__iter__'):
+                            words = [w if isinstance(w, dict) or isinstance(w, str) or not hasattr(w, '__dict__') else w.__dict__ for w in words]
+                        return {"text": text, "words": words}
+                asr_model = SimpleParakeetASR()
+                logger.info(f"[{pii_safe_file_prefix}] Loaded SimpleParakeetASR model.")
+                result = asr_model.transcribe(vocal_stem_path)
+                transcript = result["text"]
+                out_txt = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.txt"
+                out_json = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.json"
+                with open(out_txt, 'w', encoding='utf-8') as f:
+                    f.write(transcript or "")
+                with open(out_json, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+                logger.info(f"[{pii_safe_file_prefix}] Parakeet transcript saved: {out_txt}, {out_json}")
+                return {
+                    'master_transcript_text_file': str(out_txt),
+                    'transcript_json_path': str(out_json),
+                    'transcript_file': str(out_json)
+                }
+            except Exception as e:
+                logger.warning(f"[{pii_safe_file_prefix}] SimpleParakeetASR loader failed, falling back to NeMo ASRModel: {e}")
+                import nemo.collections.asr as nemo_asr
+                asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+                logger.info(f"[{pii_safe_file_prefix}] Loaded Parakeet TDT 0.6B V2 model (NeMo fallback).")
+                output = asr_model.transcribe([vocal_stem_path], timestamps=True)
+                transcript = output[0].text
+                out_txt = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.txt"
+                out_json = Path(output_dir_str) / f"{Path(vocal_stem_path).stem}_parakeet.json"
+                with open(out_txt, 'w', encoding='utf-8') as f:
+                    f.write(transcript)
+                def tensor_to_serializable(obj):
+                    if isinstance(obj, torch.Tensor):
+                        if obj.ndim == 0:
+                            return obj.item()
+                        else:
+                            return obj.detach().cpu().tolist()
+                    elif isinstance(obj, dict):
+                        return {k: tensor_to_serializable(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [tensor_to_serializable(v) for v in obj]
+                    elif hasattr(obj, '__dict__'):
+                        return tensor_to_serializable(obj.__dict__)
+                    else:
+                        return obj
+                serializable_output = tensor_to_serializable(output[0])
+                with open(out_json, 'w', encoding='utf-8') as f:
+                    json.dump(serializable_output, f, indent=2, ensure_ascii=False)
+                logger.info(f"[{pii_safe_file_prefix}] Parakeet transcript saved: {out_txt}, {out_json}")
+                return {
+                    'master_transcript_text_file': str(out_txt),
+                    'transcript_json_path': str(out_json),
+                    'transcript_file': str(out_json)
+                }
+        except Exception as e:
+            logger.error(f"[{pii_safe_file_prefix}] Parakeet ASR failed: {e}")
+            return {'transcript_txt_path': None, 'transcript_json_path': None, 'master_transcript_text_file': None, 'transcript_file': None}
+    # Default: Whisper
     if config is None: config = {}
     
     logger.info(f"[{pii_safe_file_prefix}] Starting transcription (WhisperBite-style) for: '{vocal_stem_path}', RTTM: '{diarization_file_path}'")

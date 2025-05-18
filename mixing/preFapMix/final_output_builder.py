@@ -13,6 +13,7 @@ import subprocess
 import zipfile
 import string
 from pydub import AudioSegment
+from pydub.utils import mediainfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -31,9 +32,12 @@ def delete_and_rebuild_dir(path: Path):
 
 def find_call_folders(root: Path) -> List[Path]:
     call_folders = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        if any(f.endswith('.wav') or f.endswith('.mp3') for f in filenames):
-            call_folders.append(Path(dirpath))
+    for entry in root.iterdir():
+        if entry.is_dir() and 'call_' in entry.name:
+            call_folders.append(entry)
+            logging.info(f"Found call folder: {entry}")
+        else:
+            logging.debug(f"Skipping non-call folder: {entry}")
     return call_folders
 
 def get_llm_name(call_folder: Path, call_id: str) -> str:
@@ -106,33 +110,74 @@ def build_final_output(input_root: Path, output_root: Path):
     all_metadata = {}
     processor = AudioProcessor()
     call_folders = find_call_folders(input_root)
+    logging.info(f"Found {len(call_folders)} call folders in {input_root}")
     for call_folder in call_folders:
         call_id = call_folder.name
+        logging.info(f"Processing call folder: {call_folder}")
         call_name = get_llm_name(call_folder, call_id)
         timestamp = get_timestamp()
         out_mp3_name = f"{call_name}_{timestamp}.mp3"
         out_mp3_path = output_root / out_mp3_name
-        # Find stems
-        vocal_stem = next(call_folder.rglob('*vocals_normalized.wav'), None)
-        instrumental_stem = next(call_folder.rglob('*instrumental_normalized.wav'), None)
-        if not vocal_stem or not instrumental_stem:
-            bad_calls.append({'call_id': call_id, 'reason': 'Missing stems'})
+        # Find stems in 01_audio_preprocessing only
+        pre_dir = next((d for d in call_folder.iterdir() if d.is_dir() and d.name == '01_audio_preprocessing'), None)
+        if not pre_dir:
+            logging.warning(f"No 01_audio_preprocessing folder for call {call_id}")
+            bad_calls.append({'call_id': call_id, 'reason': 'No 01_audio_preprocessing folder'})
             continue
-        # Mix and compress
-        mixed_wav = output_root / f"{call_name}_{timestamp}_mixed.wav"
+        logging.info(f"Using 01_audio_preprocessing folder for call {call_id}: {pre_dir}")
+        stems = {}
+        for leg in ['RECV', 'TRANS']:
+            for typ in ['vocals', 'instrumental']:
+                fname = f"{call_id}_{leg}_{typ}_normalized.wav"
+                fpath = pre_dir / fname
+                if fpath.exists():
+                    stems[f"{leg}_{typ}"] = fpath
+                else:
+                    logging.warning(f"Missing stem: {fname} for call {call_id}")
+        if not stems:
+            logging.warning(f"No stems found in 01_audio_preprocessing for call {call_id}")
+            bad_calls.append({'call_id': call_id, 'reason': 'No stems found in 01_audio_preprocessing'})
+            continue
+        # Mix logic
         try:
-            # Use pydub to mix
-            if not vocal_stem.exists() or not instrumental_stem.exists():
-                bad_calls.append({'call_id': call_id, 'reason': 'Missing stem files'})
+            from pydub import AudioSegment
+            # Load and pan
+            segs = {}
+            for leg, pan in [('RECV', -0.2), ('TRANS', 0.2)]:
+                for typ in ['vocals', 'instrumental']:
+                    key = f"{leg}_{typ}"
+                    if key in stems:
+                        seg = AudioSegment.from_wav(stems[key])
+                        if typ == 'instrumental':
+                            seg = seg - 6  # -6dB for instrumental
+                        seg = seg.pan(pan)
+                        segs[key] = seg
+            # Overlay logic: vocals + instrumental for each leg, then overlay both legs
+            left = segs.get('RECV_vocals', AudioSegment.silent(duration=0))
+            if 'RECV_instrumental' in segs:
+                left = left.overlay(segs['RECV_instrumental'])
+            right = segs.get('TRANS_vocals', AudioSegment.silent(duration=0))
+            if 'TRANS_instrumental' in segs:
+                right = right.overlay(segs['TRANS_instrumental'])
+            # If both legs, combine as stereo; if only one, duplicate to both channels
+            if left and right:
+                mixed = AudioSegment.from_mono_audiosegments(left, right)
+            elif left:
+                mixed = AudioSegment.from_mono_audiosegments(left, left)
+            elif right:
+                mixed = AudioSegment.from_mono_audiosegments(right, right)
+            else:
+                logging.warning(f"No valid audio for mixing for call {call_id}")
+                bad_calls.append({'call_id': call_id, 'reason': 'No valid audio for mixing'})
                 continue
-            vocals = AudioSegment.from_wav(vocal_stem)
-            instrumental = AudioSegment.from_wav(instrumental_stem) - 6  # Reduce instrumental by ~50% (6dB)
-            mixed = vocals.overlay(instrumental)
+            mixed_wav = output_root / f"{call_name}_{timestamp}_mixed.wav"
             mixed.export(mixed_wav, format="wav")
             if not mixed_wav.exists() or mixed_wav.stat().st_size == 0:
+                logging.warning(f"Mixing produced empty file for call {call_id}")
                 bad_calls.append({'call_id': call_id, 'reason': 'Mixing produced empty file'})
                 continue
         except Exception as e:
+            logging.error(f"Mixing exception for call {call_id}: {e}")
             bad_calls.append({'call_id': call_id, 'reason': f'Mixing exception: {e}'})
             continue
         ffmpeg_cmd = [
@@ -175,6 +220,7 @@ def build_final_output(input_root: Path, output_root: Path):
         # Clean up temp wav
         if mixed_wav.exists():
             mixed_wav.unlink()
+        logging.info(f"Output MP3 for call {call_id}: {out_mp3_path}")
     # Write metadata and bad calls
     with open(output_root / 'final_output_metadata.json', 'w', encoding='utf-8') as f:
         json.dump(all_metadata, f, indent=2, ensure_ascii=False)
@@ -231,6 +277,21 @@ def rename_folders_with_call_names(output_root: Path):
             new_path = output_root / sanitized
             call_dir.rename(new_path)
             logging.info(f"Renamed output folder: {call_dir.name} → {sanitized}")
+
+def is_valid_audio(file_path, min_duration_sec=5):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"File does not exist or is empty: {file_path}")
+        return False
+    try:
+        info = mediainfo(file_path)
+        duration = float(info.get('duration', 0))
+        if duration < min_duration_sec:
+            logging.error(f"File too short (<{min_duration_sec}s): {file_path} (duration: {duration:.2f}s)")
+            return False
+    except Exception as e:
+        logging.error(f"Could not get audio info for {file_path}: {e}")
+        return False
+    return True
 
 if __name__ == '__main__':
     import sys

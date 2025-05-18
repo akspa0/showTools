@@ -1,4 +1,34 @@
-# Active Context for PreFapMix
+# Active Context
+
+## Current Work Focus
+- Ensuring all pipeline stages output files to the correct, expected folders for downstream processing
+- Maintaining robust, PII-safe, user-facing output structure
+- Supporting both Whisper and Parakeet ASR engines
+- Robust error handling, logging, and output folder cleanup
+- **TOP PRIORITY:** Full refactor of CLAP segmentation using Hugging Face transformers CLAP model directly (no legacy wrappers or CLI)
+- All legacy CLAPAnnotatorWrapper, CLI, and stem separation logic have been removed from segmentation
+- The new canonical approach is implemented in `clap_segmenter.py`, which uses Hugging Face transformers CLAP model directly and ffmpeg/ffprobe for all audio I/O
+- requirements.txt and documentation have been updated accordingly
+- Implement robust, prompt-driven event detection and pairing logic
+- Output segments and metadata as before, but with a clean, maintainable codebase
+- Provide a minimal test script for validation
+
+## Recent Changes
+- Final output builder and Character.AI description generator rebuilt for robustness and compliance
+- Output folders are sanitized, unique, and cleaned up if under 192KB
+- Soundbites are generated for all speakers, with correct ID3 tags
+- yt-dlp support for audio URLs added
+- Output builder and transcription modules now support both Whisper and Parakeet
+
+## Next Steps
+- Ensure upstream pipeline always places files in correct folders for downstream modules
+- Continue improving error handling and logging
+- Monitor for edge cases in output structure and naming
+
+## Active Decisions
+- All stems are named with channel/leg info (<callname>_RECV_vocals.wav, etc.)
+- Output folders are renamed using sanitized call names from LLM output, with uniqueness enforced
+- Any output folder under 192KB is deleted as part of cleanup
 
 ## Current Overall Goal
 
@@ -46,7 +76,9 @@ Finalize all core audio processing and output generation features, including rob
         - All lineage, tagging, and extensibility requirements are met.
         - Content moderation (censoring or flagging problematic content), show-level LLM synopses, and UI integration for LLM tasks are the next focus.
     *   **NEW:** Output cleanup logic is now implemented in character_ai_description_builder.py: any call output folder under 192KB is automatically deleted after processing. This reduces clutter from empty or failed LLM runs. This logic is now also implemented in the final output builder.
+    *   **NEW:** All major scripts now include robust error handling and input validation for audio files: existence, non-zero size, and minimum duration (5s) are checked before processing. Invalid or too-short files are logged and skipped. This is now enforced in preFapMix.py, call_processor.py, final_output_builder.py, and character_ai_description_builder.py.
     *   **NEW:** Output folders are now renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output builders.
+    *   **NEW:** 02_audio_preprocessing now contains four stems per call: <callname>_RECV_vocals.wav, <callname>_RECV_instrumental.wav, <callname>_TRANS_vocals.wav, <callname>_TRANS_instrumental.wav. The final output builder mixes these into a stereo MP3 with 20% panning left/right, preserving a 40% center soundstage. If only one leg is present, output is mono or single-channel stereo. This convention is now enforced and documented.
 2.  **LLM Model & Extensibility:**
     *   The LLM model for all summarization is now set to `llama-3.1-8b-supernova-etherealhermes` in the workflow config.
     *   All LLM outputs (call name, synopsis, categories, and any user-defined tasks) are generated for every call/audio, with clear error reporting if LLM fails.
@@ -71,8 +103,12 @@ Finalize all core audio processing and output generation features, including rob
     *   Final output directory naming is robust to LLM output quirks (quotes, empty, etc.).
     *   Logging improved for debugging naming issues.
 *   **Output Cleanup & Naming:**
-    *   Output folders under 192KB are now deleted after LLM processing in both character_ai_description_builder.py and final_output_builder.py. This helps keep results clean and removes empty/bad call folders.
-    *   Output folders are now renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output builders.
+    *   Output folders under 192KB are now deleted after processing (character_ai_description_builder.py and final_output_builder.py).
+    *   Output folders are renamed using sanitized call names from call_title.txt or *_suggested_name.txt, matching the final output builder's naming logic (punctuation removed, 8-word limit, underscores, fallback to folder name, uniqueness enforced). This is now consistent across both character and final output scripts.
+*   **Robust Error Handling:**
+    *   All major scripts now validate audio file existence, size, and minimum duration (5s) before processing. Invalid or too-short files are logged and skipped. This prevents pipeline failures and silent data loss.
+*   **Stereo Mixing Convention:**
+    *   02_audio_preprocessing now contains four stems per call (<callname>_RECV_vocals.wav, <callname>_RECV_instrumental.wav, <callname>_TRANS_vocals.wav, <callname>_TRANS_instrumental.wav). The final output builder mixes these into a stereo MP3 with 20% panning left/right, preserving a 40% center soundstage. If only one leg is present, output is mono or single-channel stereo.
 *   **Documentation:**
     *   README and CLI usage updated for clarity and modern workflow.
     *   LLM extensibility and prompt templating now documented.
@@ -114,3 +150,10 @@ Finalize all core audio processing and output generation features, including rob
   - Add robust logging and error handling.
 - The output structure will be flat, user-facing, and future-proof, with all calls in the root and supporting folders for transcripts, soundbites, and metadata.
 - This will be implemented in a new session.
+
+## Top Priority: CLAP Segmentation
+- Implement robust, configurable CLAP-based segmentation for all input audio (not just phone calls).
+- After CLAP annotation, parse events to split audio into logical segments.
+- Each segment is processed as a virtual call through the full pipeline.
+- Update workflow executor, config, and documentation to support this as a core feature.
+- This will enable the pipeline to handle arbitrary audio (podcasts, radio, meetings, etc.) as well as call data.

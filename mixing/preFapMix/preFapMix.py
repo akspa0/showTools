@@ -8,6 +8,7 @@ import shutil
 import gc
 import json
 import tempfile
+from pydub.utils import mediainfo
 
 logging.basicConfig(level=logging.INFO)
 
@@ -60,8 +61,25 @@ def get_audio_info(file_path):
         logging.error(f"Error getting audio info: {e}")
         return audio_info
 
+def is_valid_audio(file_path, min_duration_sec=5):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"File does not exist or is empty: {file_path}")
+        return False
+    try:
+        info = mediainfo(file_path)
+        duration = float(info.get('duration', 0))
+        if duration < min_duration_sec:
+            logging.error(f"File too short (<{min_duration_sec}s): {file_path} (duration: {duration:.2f}s)")
+            return False
+    except Exception as e:
+        logging.error(f"Could not get audio info for {file_path}: {e}")
+        return False
+    return True
+
 def normalize_audio_ffmpeg(input_file, output_file, target_lufs=-14.0, apply_limiter=True):
-    """Normalize audio to target LUFS using FFmpeg."""
+    if not is_valid_audio(input_file):
+        logging.error(f"Skipping normalization for invalid input: {input_file}")
+        return False
     limiter_filter = ":peak=0.97" if apply_limiter else ""
     
     command = [
@@ -73,7 +91,9 @@ def normalize_audio_ffmpeg(input_file, output_file, target_lufs=-14.0, apply_lim
     return run_ffmpeg_command(command, f"Normalizing audio to {target_lufs} LUFS")
 
 def resample_audio_ffmpeg(input_file, output_file, sample_rate=44100):
-    """Resample audio to target sample rate using FFmpeg."""
+    if not is_valid_audio(input_file):
+        logging.error(f"Skipping resampling for invalid input: {input_file}")
+        return False
     command = [
         "ffmpeg", "-y", "-i", input_file,
         "-ar", str(sample_rate), output_file
@@ -82,7 +102,9 @@ def resample_audio_ffmpeg(input_file, output_file, sample_rate=44100):
     return run_ffmpeg_command(command, f"Resampling audio to {sample_rate} Hz")
 
 def mix_to_stereo_ffmpeg(left_file, right_file, output_file, left_pan=-0.2, right_pan=0.2, append_tones=False):
-    """Mix left and right channels to stereo using FFmpeg."""
+    if not is_valid_audio(left_file) or not is_valid_audio(right_file):
+        logging.error(f"Skipping stereo mix due to invalid input(s): {left_file}, {right_file}")
+        return False
     # First, ensure both files are at the same sample rate (44.1kHz)
     left_info = get_audio_info(left_file)
     right_info = get_audio_info(right_file)
@@ -243,6 +265,9 @@ def process_audio_files(input_dir, output_dir, transcribe_left=False, transcribe
         file_path = os.path.join(input_dir, filename)
         if not os.path.isfile(file_path):
             continue  # Skip directories
+        if not is_valid_audio(file_path):
+            logging.error(f"Skipping invalid or too short audio file: {file_path}")
+            continue
         file_timestamp = os.path.getmtime(file_path)
         logging.info(f"Processing file: {filename}")
         

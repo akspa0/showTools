@@ -13,6 +13,8 @@ import queue
 import soundfile as sf
 import numpy as np
 import mutagen
+from final_output_builder import build_final_output
+import yt_dlp
 
 # Global logger for the executor
 logger = logging.getLogger(__name__)
@@ -236,27 +238,11 @@ def execute_workflow(workflow_file_path: str, input_audio_file_str: str, base_ou
             stage_inputs_config = stage_def.get("inputs", {})
             resolved_inputs = _resolve_stage_inputs(stage_inputs_config, workflow_context, current_stage_output_dir, input_audio_file, main_run_dir)
 
-            # Get the configuration specific to the function
             function_specific_config = stage_def.get("config", {})
-            
-            # Prepare arguments for the function call
-            # Some functions might expect all their params directly, 
-            # others might expect a 'config' dict plus specific inputs.
-            # We'll pass resolved_inputs directly, and the function_specific_config as 'config' if present.
-            # The stage function must be designed to accept these.
-            
-            args_for_function = {**resolved_inputs} # Start with resolved inputs
-
-            # Add the PII-safe identifier stem as a standard argument for stages to use in naming temp/output files
+            args_for_function = {**resolved_inputs}
             args_for_function['pii_safe_file_prefix'] = pii_safe_identifier_stem 
-
-            # If the stage_def.config is not empty, pass it as a 'config' kwarg to the function.
-            # The called function should expect a 'config' argument if this is provided.
-            # Alternatively, one could merge stage_def.config into args_for_function if functions
-            # are designed to take all their parameters flatly. This current approach is more explicit.
             if function_specific_config:
                  args_for_function['config'] = function_specific_config
-
 
             logger.debug(f"Importing module: {module_name}, function: {function_name}")
             module_to_import = importlib.import_module(module_name)
@@ -265,38 +251,103 @@ def execute_workflow(workflow_file_path: str, input_audio_file_str: str, base_ou
             logger.info(f"Executing: {module_name}.{function_name}")
             logger.debug(f"With arguments (first level): { {k: type(v) for k, v in args_for_function.items()} }")
 
-
-            stage_result = function_to_call(**args_for_function)
-            
-            # Store results in context
-            if stage_def.get("outputs"):
-                for context_key, result_key_expression in stage_def["outputs"].items():
-                    if result_key_expression == "return_value":
-                        if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
-                            workflow_context[stage_name] = {}
-                        workflow_context[stage_name][context_key] = stage_result # Store the result under the context_key
-                        logger.debug(f"Stage '{stage_name}' full result stored in context['{stage_name}']['{context_key}'].")
-                    elif isinstance(stage_result, dict) and result_key_expression in stage_result:
-                        # This branch handles "context_key": "key_directly_in_result_dict"
-                        # This is likely not used often if "return_value[key]" is preferred.
-                        if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
-                             workflow_context[stage_name] = {}
-                        workflow_context[stage_name][context_key] = stage_result[result_key_expression]
-                        logger.debug(f"Stage '{stage_name}' output '{result_key_expression}' (direct key) stored in context['{stage_name}']['{context_key}'].")
-                    elif isinstance(stage_result, dict) and result_key_expression.startswith("return_value[") and result_key_expression.endswith("]"):
-                        actual_key = result_key_expression[len("return_value["):-1]
-                        if actual_key in stage_result:
-                            # Store the output under the stage_name, then the context_key from workflow
+            # Special handling for CLAP segmentation output
+            if stage_name == "clap_event_annotation":
+                stage_result = function_to_call(**args_for_function)
+                # Check for new segmentation output
+                if stage_result and "clap_segments_summary" in stage_result:
+                    summary_path = Path(stage_result["clap_segments_summary"])
+                    with open(summary_path, 'r') as sf:
+                        segments = json.load(sf)
+                    logger.info(f"CLAP segmentation produced {len(segments)} segments. Launching virtual calls for each segment.")
+                    # For each segment, run the rest of the pipeline as a virtual call
+                    downstream_stages = stages[i+1:]
+                    for seg_idx, seg in enumerate(segments):
+                        seg_audio = seg["segment_wav"]
+                        seg_meta = seg["meta_json"]
+                        seg_prefix = Path(seg_audio).stem
+                        logger.info(f"Processing segment {seg_idx+1}/{len(segments)}: {seg_audio}")
+                        seg_run_dir = main_run_dir / f"segment_{seg_idx+1:03d}_{seg_prefix}"
+                        seg_run_dir.mkdir(parents=True, exist_ok=True)
+                        seg_context = {"segment_audio": seg_audio, "segment_meta": seg_meta}
+                        # For each downstream stage, run as usual but override input_audio_file to segment
+                        seg_workflow_context = dict(workflow_context) # Copy context up to this point
+                        seg_workflow_context["clap_event_annotation"] = {"segment_audio": seg_audio, "segment_meta": seg_meta}
+                        seg_input_audio_file = Path(seg_audio)
+                        for j, downstream_stage_def in enumerate(downstream_stages):
+                            ds_stage_name = downstream_stage_def.get("stage_name", f"stage_{i+1+j:02d}")
+                            ds_module_name = downstream_stage_def.get("module")
+                            ds_function_name = downstream_stage_def.get("function")
+                            ds_stage_output_dir = seg_run_dir / f"{j:02d}_{ds_stage_name}"
+                            ds_stage_output_dir.mkdir(parents=True, exist_ok=True)
+                            ds_stage_inputs_config = downstream_stage_def.get("inputs", {})
+                            # Override input_audio_file for this segment
+                            ds_resolved_inputs = _resolve_stage_inputs(ds_stage_inputs_config, seg_workflow_context, ds_stage_output_dir, seg_input_audio_file, seg_run_dir)
+                            ds_args_for_function = {**ds_resolved_inputs}
+                            ds_args_for_function['pii_safe_file_prefix'] = seg_prefix
+                            ds_function_specific_config = downstream_stage_def.get("config", {})
+                            if ds_function_specific_config:
+                                ds_args_for_function['config'] = ds_function_specific_config
+                            ds_module_to_import = importlib.import_module(ds_module_name)
+                            ds_function_to_call = getattr(ds_module_to_import, ds_function_name)
+                            logger.info(f"[Segment {seg_idx+1}] Executing: {ds_module_name}.{ds_function_name}")
+                            ds_stage_result = ds_function_to_call(**ds_args_for_function)
+                            # Store results in seg_workflow_context for downstream input resolution
+                            if downstream_stage_def.get("outputs"):
+                                for context_key, result_key_expression in downstream_stage_def["outputs"].items():
+                                    if result_key_expression == "return_value":
+                                        if ds_stage_name not in seg_workflow_context or not isinstance(seg_workflow_context.get(ds_stage_name), dict):
+                                            seg_workflow_context[ds_stage_name] = {}
+                                        seg_workflow_context[ds_stage_name][context_key] = ds_stage_result
+                                    elif isinstance(ds_stage_result, dict) and result_key_expression in ds_stage_result:
+                                        if ds_stage_name not in seg_workflow_context or not isinstance(seg_workflow_context.get(ds_stage_name), dict):
+                                            seg_workflow_context[ds_stage_name] = {}
+                                        seg_workflow_context[ds_stage_name][context_key] = ds_stage_result[result_key_expression]
+                                    elif isinstance(ds_stage_result, dict) and result_key_expression.startswith("return_value[") and result_key_expression.endswith("]"):
+                                        actual_key = result_key_expression[len("return_value["):-1]
+                                        if actual_key in ds_stage_result:
+                                            if ds_stage_name not in seg_workflow_context or not isinstance(seg_workflow_context.get(ds_stage_name), dict):
+                                                seg_workflow_context[ds_stage_name] = {}
+                                            seg_workflow_context[ds_stage_name][context_key] = ds_stage_result[actual_key]
+                    logger.info(f"All segments processed. Skipping downstream stages for original file.")
+                    break # Do not process downstream stages for the original file
+                else:
+                    # Fallback: old single-file flow
+                    if stage_def.get("outputs"):
+                        for context_key, result_key_expression in stage_def["outputs"].items():
+                            if result_key_expression == "return_value":
+                                if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
+                                    workflow_context[stage_name] = {}
+                                workflow_context[stage_name][context_key] = stage_result
+                            elif isinstance(stage_result, dict) and result_key_expression in stage_result:
+                                if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
+                                    workflow_context[stage_name] = {}
+                                workflow_context[stage_name][context_key] = stage_result[result_key_expression]
+                            elif isinstance(stage_result, dict) and result_key_expression.startswith("return_value[") and result_key_expression.endswith("]"):
+                                actual_key = result_key_expression[len("return_value["):-1]
+                                if actual_key in stage_result:
+                                    if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
+                                        workflow_context[stage_name] = {}
+                                    workflow_context[stage_name][context_key] = stage_result[actual_key]
+            else:
+                # Normal stage execution for non-CLAP stages
+                stage_result = function_to_call(**args_for_function)
+                if stage_def.get("outputs"):
+                    for context_key, result_key_expression in stage_def["outputs"].items():
+                        if result_key_expression == "return_value":
                             if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
                                 workflow_context[stage_name] = {}
-                            workflow_context[stage_name][context_key] = stage_result[actual_key]
-                            logger.debug(f"Stage '{stage_name}' output '{actual_key}' from result dict stored in context['{stage_name}']['{context_key}'].")
-                        else:
-                            logger.error(f"Output key '{actual_key}' (from expression '{result_key_expression}') not found in stage '{stage_name}' result dict. Stage considered failed.")
-                            stage_failed = True # Mark stage as failed
-                    else:
-                        logger.error(f"Output key expression '{result_key_expression}' for context key '{context_key}' could not be resolved from stage '{stage_name}' result. Stage considered failed.")
-                        stage_failed = True # Mark stage as failed
+                            workflow_context[stage_name][context_key] = stage_result
+                        elif isinstance(stage_result, dict) and result_key_expression in stage_result:
+                            if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
+                                workflow_context[stage_name] = {}
+                            workflow_context[stage_name][context_key] = stage_result[result_key_expression]
+                        elif isinstance(stage_result, dict) and result_key_expression.startswith("return_value[") and result_key_expression.endswith("]"):
+                            actual_key = result_key_expression[len("return_value["):-1]
+                            if actual_key in stage_result:
+                                if stage_name not in workflow_context or not isinstance(workflow_context.get(stage_name), dict):
+                                    workflow_context[stage_name] = {}
+                                workflow_context[stage_name][context_key] = stage_result[actual_key]
             
             if stage_failed: # Check if any output mapping failed
                 logger.error(f"--- Stage {stage_name} failed due to missing output mapping. Context set to None. ---")
@@ -427,21 +478,50 @@ def extract_audio_metadata(input_path: Path) -> dict:
             break
     return info
 
+def download_audio(url, output_dir, force_redownload=True):
+    """Download audio from a URL and save it to the output directory with a unique filename."""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'quiet': False,
+        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s')
+    }
+    if force_redownload:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ydl_opts['outtmpl'] = os.path.join(output_dir, f'%(title)s_{timestamp}.%(ext)s')
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            downloaded_file = os.path.join(output_dir, f"{info['title']}.wav")
+            if not os.path.exists(downloaded_file):
+                for file in os.listdir(output_dir):
+                    if info['title'] in file:
+                        downloaded_file = os.path.join(output_dir, file)
+                        break
+            logger.info(f"Downloaded audio saved to {downloaded_file}")
+            return downloaded_file
+    except Exception as e:
+        logger.error(f"Error downloading audio from {url}: {e}")
+        raise
+
 def main():
     parser = argparse.ArgumentParser(description="Execute an audio processing workflow from a JSON definition.")
     parser.add_argument("--config_file", type=str, required=True, help="Path to the workflow JSON configuration file.")
-    
-    # Input can be a single file or a directory
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--input_file", "--input_audio_file", dest="input_audio_file", type=str, help="Path to a single input audio file.")
     input_group.add_argument("--input_dir", type=str, help="Path to a directory of input audio files or call folders.")
+    input_group.add_argument("--url", type=str, help="URL to download audio from.")
     parser.add_argument("--output_dir", type=str, required=True, help="Path to the output directory for workflow results.")
     parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level.")
     parser.add_argument("--cp_llm_model_id", type=str, default=None, help="LLM model ID for call_processor.")
     parser.add_argument("--final_call_output_dir", type=str, default=None, help="(Deprecated) Final output directory for processed calls.")
     parser.add_argument("--enable_clap_separation", action="store_true", help="Enable CLAP-based call segmentation after annotation. If set, audio will be segmented using CLAP annotations (e.g., telephone ringing/hang-up) and each segment will be processed as a separate call.")
     parser.add_argument("--num_speakers", type=int, default=None, help="Hard number of speakers for diarization. If set, overrides workflow config and disables automatic detection.")
-
+    parser.add_argument("--asr_engine", type=str, choices=["whisper", "parakeet"], default=None, help="Override ASR engine for transcription stage (whisper or parakeet).")
     args = parser.parse_args()
 
     # Initial logging setup (console only until run-specific log file is set in execute_workflow)
@@ -452,9 +532,20 @@ def main():
                         handlers=[logging.StreamHandler()])
 
     files_to_process = []
-    is_potential_call_folder = False # Flag to indicate if input_dir contains call-specific files
-
-    if args.input_audio_file:
+    is_potential_call_folder = False
+    if args.url:
+        download_target_dir = os.path.join(args.output_dir, "downloads")
+        os.makedirs(download_target_dir, exist_ok=True)
+        try:
+            logger.info(f"Downloading audio from {args.url} to {download_target_dir}")
+            downloaded_file = download_audio(args.url, download_target_dir)
+            if not downloaded_file or not os.path.exists(downloaded_file):
+                raise ValueError("download_audio failed to return a valid path.")
+            files_to_process.append(downloaded_file)
+        except Exception as e:
+            logger.error(f"Failed to download URL {args.url}: {e}")
+            return
+    elif args.input_audio_file:
         files_to_process.append(args.input_audio_file)
     elif args.input_dir:
         input_dir_path = Path(args.input_dir)
@@ -586,23 +677,29 @@ def main():
         with open(meta_path, 'w') as f:
             json.dump(meta, f, indent=2)
         # If --num_speakers is set, override the diarization stage config before running the workflow
-        if args.num_speakers is not None:
+        if args.num_speakers is not None or args.asr_engine is not None:
             # Load the workflow config file
             with open(args.config_file, 'r') as f:
                 workflow_config = json.load(f)
             # Find the diarization stage and override num_speakers
             for stage in workflow_config.get('stages', []):
-                if stage.get('stage_name', '').lower() == 'speaker_diarization':
+                if args.num_speakers is not None and stage.get('stage_name', '').lower() == 'speaker_diarization':
                     if 'config' not in stage:
                         stage['config'] = {}
                     stage['config']['num_speakers'] = args.num_speakers
+                if args.asr_engine is not None and stage.get('stage_name', '').lower() == 'transcription':
+                    if 'config' not in stage:
+                        stage['config'] = {}
+                    stage['config']['asr_engine'] = args.asr_engine
+                    logger.info(f"Overriding transcription ASR engine to '{args.asr_engine}' via CLI.")
             # Save the modified workflow config to a temp file
             import tempfile
             with tempfile.NamedTemporaryFile('w', delete=False, suffix='.json') as tmpf:
                 json.dump(workflow_config, tmpf, indent=2)
                 tmp_config_path = tmpf.name
             args.config_file = tmp_config_path
-            logger.info(f"Overriding diarization num_speakers to {args.num_speakers} via CLI. Using temp config: {tmp_config_path}")
+            if args.num_speakers is not None:
+                logger.info(f"Overriding diarization num_speakers to {args.num_speakers} via CLI. Using temp config: {tmp_config_path}")
         success = execute_workflow(args.config_file, audio_file_str, args.output_dir, args.log_level)
         if not success:
             all_workflows_succeeded = False
@@ -614,13 +711,11 @@ def main():
     logger.info(f"All individual file workflow executions complete. Overall success: {all_workflows_succeeded}")
 
     # --- Always run the final output builder as the last step ---
-    from final_output_builder import FinalOutputBuilder
     project_root = Path(__file__).resolve().parent
     output_dir = project_root / '05_final_output'
     output_dir.mkdir(parents=True, exist_ok=True)
     processed_calls_dir = project_root / 'workspace' / 'processed_calls'
-    builder = FinalOutputBuilder(project_root, output_dir, processed_calls_dir=processed_calls_dir)
-    builder.run()
+    build_final_output(project_root, output_dir, processed_calls_dir=processed_calls_dir)
 
 if __name__ == "__main__":
     main() 

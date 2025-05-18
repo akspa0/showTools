@@ -43,8 +43,8 @@ logger.info("--- Attempting to import other project modules (after lmstudio test
 try:
     import audio_preprocessor
     logger.info("Successfully imported audio_preprocessor")
-    import clap_module
-    logger.info("Successfully imported clap_module")
+    import clap_segmenter
+    logger.info("Successfully imported clap_segmenter")
     import diarization_module
     logger.info("Successfully imported diarization_module")
     # We will still try to import llm_module to see if IT causes an error now,
