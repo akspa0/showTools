@@ -1,3 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
 # cursor-rules.md
 
 ## Project Intelligence & Patterns
@@ -17,15 +22,13 @@
 - Always resample to 16kHz mono only for model inference (pyannote, parakeet); never use 16kHz files for final outputs or soundbites.
 - All soundbites and final outputs must be cut from the highest quality, normalized split vocal audio available.
 - Manifest must track all file versions, sample rates, indices, and processing lineage for full traceability.
-- Remixing logic: instrumentals at 50% volume, stereo channels panned 60/40 for a 40% separation effect (stereo_left = 0.6*left_mix + 0.4*right_mix, stereo_right = 0.4*left_mix + 0.6*right_mix).
-- All vocals used in remix/show must be normalized to -14.0 LUFS.
+- Remixing logic: instrumentals at 50% volume, stereo channels panned 20% from center for a 40% separation effect.
 - Output directory structure must mirror input, with each call in its own indexed folder containing /soundbites, /call, /transcripts, /llm_outputs.
 - Show output: concatenated calls (with optional tones), plus a text file listing call order, call start timestamps, and metadata.
-- All output files must be included in the manifest, with robust error handling and defensive filtering for malformed data.
 - Document any new patterns, challenges, or workflow preferences here as the project evolves.
 - CLAP annotation is required for all out- prefixed files and other audio types where context is needed
 - Use a configurable list of prompts for CLAP to search for relevant audio events (e.g., dogs barking, DTMF, ringing, yelling, etc.)
-- Only accept CLAP annotations with a confidence level of 0.9 or higher
+- Only accept CLAP annotations with a confidence level of 0.6 or higher
 - All accepted CLAP annotations must be added to the master transcript and manifest for each call, to provide context for LLM and downstream processing
 - After diarization, segment normalized vocals per speaker and store in speakers/SXX/ folders
 - Each segment is named with a chronological index and a short, meaningful name (≤ 48 characters)
@@ -47,8 +50,6 @@
 - Produce new call files with chronological call index as filename and LLM-generated call title, sanitized of all punctuation from LLM call title response
 - Optionally apply tones to call files (if not in show-mode)
 - Show output: concatenate all valid calls (>10s, error-free) into a single WAV file, insert tones between calls, and include a text file listing call order, names, timestamps, and metadata
-- LLM config, prompts, and output mapping are user-extensible via workflow JSONs; CLI options allow override of LLM config and call tones.
-- Defensive programming and robust error handling are required at every stage; skip and warn on malformed data, and ensure all outputs are auditable and extensible.
 
 ---
 
@@ -59,15 +60,6 @@
 - Master transcript aligns all diarized utterances and CLAP annotations in true chronological order.
 - Transcript format: [CHANNEL][SPEAKER][START-END] for utterances, [CLAP][START-END][annotation] for CLAP events.
 - All entries in the master transcript are sorted by start time for context and LLM use.
-- **Finalization stage:**
-  - All valid soundbites and show audio are converted to 192kbps VBR MP3s in a finalized/ output folder.
-  - ID3 tags are embedded in all MP3s, including call index, channel, speaker, segment index, timestamps, transcript, LLM-generated call title, and full lineage.
-  - LLM-driven show title and description are generated via a secondary LLM task using all call titles and synopses; show title is a short, family-friendly, comedic sentence or phrase.
-  - Show MP3 and .txt description are named after the sanitized LLM show title; fallback to completed-show.mp3 if LLM output is missing/invalid.
-  - Show description is included in manifest, ID3 tags, and as a separate .txt file.
-  - Two-stage LLM workflow: per-call titles/synopses, then show-level title/description.
-  - Manifest and logs are updated with all finalized outputs and metadata.
-
 - **All logging and manifest writing must be strictly PII-free. No original filenames, paths, or other PII may be logged or output at any stage. Logging and manifest writing are only permitted after all files are anonymized and originals are deleted, and only anonymized fields (output_name, output_path, tuple_index, subid, type, timestamp) may be used. This applies to all pipeline stages, scripts, and utilities.**
 
 _This file is a living document. Update it as you discover new patterns or preferences in the project._ 

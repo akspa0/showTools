@@ -75,7 +75,13 @@ def run_clap_annotation(audio_path: Path, prompts: List[str], model_id: str = "l
             })
     return all_results
 
-def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List[str] = None, model_id: str = "laion/clap-htsat-unfused", chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.5) -> List[Dict]:
+def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List[str] = None, model=None, chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.5) -> List[Dict]:
+    """
+    Annotate all 'out' files in renamed_dir using CLAP and save results in clap_dir.
+    Uses the specified CLAP model (default: fused model).
+    """
+    if model is None:
+        model = 'laion/clap-htsat-fused'  # Default to fused model
     # Default prompts if not provided
     if prompts is None:
         prompts = [
@@ -91,7 +97,7 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
             continue
         out_dir = clap_dir / call_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        annotations = run_clap_annotation(file, prompts, model_id, chunk_length_sec, overlap_sec, confidence_threshold)
+        annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
         ann_path = out_dir / 'clap_annotations.json'
         with open(ann_path, 'w', encoding='utf-8') as f:
             json.dump(annotations, f, indent=2)
