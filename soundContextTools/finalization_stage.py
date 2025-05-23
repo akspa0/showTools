@@ -429,10 +429,48 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     # --- 4. Soundbites ---
     soundbites_root = run_folder / 'soundbites'
     clap_root = run_folder / 'clap'
-    for call_dir in soundbites_root.iterdir():
+    for call_dir in list(soundbites_root.iterdir()):
         if not call_dir.is_dir():
             continue
-        master_transcript_events = []
+        call_id = call_dir.name
+        # Determine sanitized call title
+        call_title = call_id
+        call_title_path = llm_dir / call_id / 'call_title.txt'
+        if call_title_path.exists():
+            with open(call_title_path, 'r', encoding='utf-8') as f:
+                lines = [line.strip().strip('"') for line in f.read().splitlines() if line.strip()]
+                if lines:
+                    call_title = lines[0]
+                    call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+        sanitized_title = sanitize_filename(call_title)
+        new_call_dir = soundbites_root / sanitized_title
+        # If the new folder already exists, merge contents
+        if new_call_dir.exists():
+            # Move all files/subfolders from old to new
+            for item in call_dir.iterdir():
+                target = new_call_dir / item.name
+                if target.exists():
+                    continue  # skip if already exists
+                if item.is_dir():
+                    import shutil
+                    shutil.move(str(item), str(target))
+                else:
+                    import shutil
+                    shutil.move(str(item), str(target))
+            call_dir.rmdir()
+        else:
+            call_dir.rename(new_call_dir)
+        # Copy master transcript into the new folder
+        master_txt = soundbites_root / sanitized_title / 'master_transcript.txt'
+        master_json = soundbites_root / sanitized_title / 'master_transcript.json'
+        orig_master_txt = soundbites_root / call_id / 'master_transcript.txt'
+        orig_master_json = soundbites_root / call_id / 'master_transcript.json'
+        if orig_master_txt.exists():
+            import shutil
+            shutil.copy2(orig_master_txt, master_txt)
+        if orig_master_json.exists():
+            import shutil
+            shutil.copy2(orig_master_json, master_json)
         # Gather CLAP events for this call (confidence >= 0.9)
         clap_events = []
         clap_call_dir = clap_root / call_dir.name
