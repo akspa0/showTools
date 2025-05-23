@@ -452,6 +452,7 @@ class PipelineOrchestrator:
         Transcribe all speaker segments using the selected ASR engine (parakeet or whisper).
         Updates manifest with transcript results.
         Logs every file written and updates manifest.
+        Tracks and logs failed/skipped transcriptions for full auditability.
         """
         speakers_dir = self.run_folder / 'speakers'
         segments = [entry for entry in self.manifest if entry.get('stage') == 'resampled' and 'wav_16k' in entry]
@@ -489,7 +490,40 @@ class PipelineOrchestrator:
             asr_config = {}
         asr_config = {**asr_config, 'asr_engine': asr_engine}
         results = transcribe_segments(segments, asr_config)
-        for res in results:
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
+        for seg, res in zip(segments, results):
+            if res.get('error'):
+                self.log_and_manifest(
+                    stage='transcription_failed',
+                    call_id=seg.get('call_id'),
+                    input_files=[str(seg.get('wav'))],
+                    output_files=[],
+                    params={'asr_engine': asr_engine},
+                    metadata={'error': res.get('error')},
+                    event='transcription',
+                    result='error',
+                    error=res.get('error')
+                )
+                fail_count += 1
+                continue
+            # Check for missing .txt or .json
+            if not res.get('txt') or not os.path.exists(res.get('txt')):
+                warn_msg = f"Transcription .txt missing for {seg.get('wav')}"
+                self.log_and_manifest(
+                    stage='transcription_skipped',
+                    call_id=seg.get('call_id'),
+                    input_files=[str(seg.get('wav'))],
+                    output_files=[],
+                    params={'asr_engine': asr_engine},
+                    metadata={'warning': warn_msg},
+                    event='transcription',
+                    result='skipped',
+                    error=warn_msg
+                )
+                skip_count += 1
+                continue
             self.log_and_manifest(
                 stage='transcribed',
                 call_id=res.get('call_id'),
@@ -498,14 +532,16 @@ class PipelineOrchestrator:
                 params={'asr_engine': asr_engine},
                 metadata={'error': res.get('error') if 'error' in res else None},
                 event='transcription',
-                result='success' if not res.get('error') else 'error',
+                result='success',
                 error=res.get('error') if 'error' in res else None
             )
             self.manifest.append({
                 **res,
                 'stage': 'transcribed'
             })
-        self.log_event('INFO', 'transcription_complete', {'count': len(results)})
+            success_count += 1
+        self.log_event('INFO', 'transcription_complete', {'count': len(results), 'success': success_count, 'failed': fail_count, 'skipped': skip_count})
+        print(f"[SUMMARY] Transcription: {success_count} succeeded, {fail_count} failed, {skip_count} skipped.")
 
     @staticmethod
     def sanitize(text, max_words=12, max_length=40):
@@ -1492,9 +1528,105 @@ if __name__ == '__main__':
     parser.add_argument('--clear-from', type=str, metavar='STAGE', help='Clear completion status from specified stage onwards')
     parser.add_argument('--stage-status', type=str, metavar='STAGE', help='Show detailed status for a specific stage')
     parser.add_argument('--show-resume-status', action='store_true', help='Show current resume status and exit')
-    
+    parser.add_argument('--force', action='store_true', help='When used with --resume-from, deletes all outputs and state from that stage forward for a clean re-run')
+
+    # Print valid stage names in help
+    from pipeline_state import get_pipeline_stages
+    STAGE_LIST = get_pipeline_stages()
+    parser.epilog = (
+        "\nValid stage names for --resume-from, --force-rerun, --clear-from, --stage-status:\n  " + ", ".join(STAGE_LIST) +
+        "\n\nExample: --resume-from diarization\n" +
+        "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n"
+    )
+
     args = parser.parse_args()
-    
+
+    # Handle --force logic
+    if args.output_folder and args.resume_from and args.force:
+        # Clear state and delete outputs from the specified stage forward
+        from resume_utils import ResumeHelper
+        run_folder = Path(args.output_folder)
+        helper = ResumeHelper(run_folder)
+        # Clear state
+        helper.clear_from_stage(args.resume_from)
+        # Delete output folders/files for all downstream stages
+        stages = get_pipeline_stages()
+        start_idx = stages.index(args.resume_from)
+        stages_to_delete = stages[start_idx:]
+        # Map stage names to output subfolders (update as needed)
+        stage_to_folder = {
+            'separation': 'separated',
+            'normalization': 'normalized',
+            'true_peak_normalization': 'true_peak_normalized',
+            'clap': 'clap',
+            'diarization': 'diarized',
+            'segmentation': 'speakers',
+            'resampling': 'speakers',
+            'transcription': 'speakers',
+            'soundbite_renaming': 'soundbites',
+            'soundbite_finalization': 'soundbites',
+            'llm': 'llm',
+            'remix': 'call',
+            'show': 'show',
+            'finalization': 'finalized',
+        }
+        deleted_folders = set()
+        for stage in stages_to_delete:
+            folder = stage_to_folder.get(stage)
+            if folder:
+                target = run_folder / folder
+                if target.exists():
+                    import shutil
+                    print(f"[FORCE] Deleting {target}")
+                    shutil.rmtree(target)
+                    deleted_folders.add(folder)
+        print(f"[FORCE] Cleared state and deleted outputs from '{args.resume_from}' onwards.")
+        # Safety check: ensure resume point has all required inputs
+        # Map each stage to its required input folders
+        stage_inputs = {
+            'separation': ['renamed'],
+            'normalization': ['separated'],
+            'true_peak_normalization': ['normalized'],
+            'clap': ['renamed'],
+            'diarization': ['separated'],
+            'segmentation': ['diarized', 'separated'],
+            'resampling': ['speakers'],
+            'transcription': ['speakers'],
+            'soundbite_renaming': ['speakers'],
+            'soundbite_finalization': ['speakers'],
+            'llm': ['soundbites'],
+            'remix': ['true_peak_normalized', 'normalized', 'separated'],
+            'show': ['call'],
+            'finalization': ['finalized', 'show', 'llm', 'soundbites'],
+        }
+        # Find the earliest stage >= resume_from that has all its required input folders present
+        bump_stage = None
+        for idx in range(start_idx, len(stages)):
+            stage = stages[idx]
+            required = stage_inputs.get(stage, [])
+            missing = [fld for fld in required if not (run_folder / fld).exists()]
+            if missing:
+                bump_stage = None  # Can't run this stage
+            else:
+                bump_stage = stage
+                break
+        if bump_stage is None or bump_stage != args.resume_from:
+            # Find the earliest previous stage that can be run
+            for idx in range(start_idx-1, -1, -1):
+                stage = stages[idx]
+                required = stage_inputs.get(stage, [])
+                missing = [fld for fld in required if not (run_folder / fld).exists()]
+                if not missing:
+                    bump_stage = stage
+                    break
+        if bump_stage is None:
+            print(f"[ERROR] Cannot resume: no valid stage found with all required inputs present after --force deletion.")
+            exit(1)
+        if bump_stage != args.resume_from:
+            print(f"[WARN] Cannot resume from '{args.resume_from}' because required input folders are missing after --force deletion.")
+            print(f"[INFO] Auto-bumping resume point to '{bump_stage}'.")
+            args.resume_from = bump_stage
+
     # Determine if we're resuming from an existing folder or starting fresh
     if args.output_folder:
         run_folder = Path(args.output_folder)
