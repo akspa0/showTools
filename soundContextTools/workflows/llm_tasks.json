@@ -1,0 +1,34 @@
+{
+  "llm_tasks": [
+    {
+      "name": "call_title",
+      "prompt_template": "TITLE: [Return a single, witty, PII-safe title for the call, no more than 12 words. Do not include punctuation or extra commentary. The transcript uses [LEFT] and [RIGHT] to indicate audio channels.] Transcript:\n{transcript}",
+      "output_file": "call_title.txt"
+    },
+    {
+      "name": "call_synopsis",
+      "prompt_template": "SYNOPSIS: [A very brief (1-3 sentences) factual summary of the conversation's main points, delivered with a lighthearted or witty tone. Stick strictly to the transcript content. The transcript uses [LEFT] and [RIGHT] to indicate audio channels.] Transcript:\n{transcript}",
+      "output_file": "call_synopsis.txt"
+    },
+    {
+      "name": "call_categories",
+      "prompt_template": "CATEGORIES: [A comma-separated list of 2-5 simple, human-readable categories that best describe the content of the call or audio. Examples: comedy, family, adult content, customer service, complaint, technical support, prank call, etc. Do NOT use hashtags or Twitter formatting. The transcript uses [LEFT] and [RIGHT] to indicate audio channels.] Transcript:\n{transcript}",
+      "output_file": "call_categories.txt"
+    },
+    {
+      "name": "sdxl_image_prompt",
+      "prompt_template": "IMAGE PROMPT: [Write a detailed, creative prompt for a Stable Diffusion XL (SDXL) model to generate an image that visually represents the scene or mood of this call. Be vivid, avoid text overlays, and focus on the main themes. The transcript uses [LEFT] and [RIGHT] to indicate audio channels.] Transcript:\n{transcript}",
+      "output_file": "sdxl_image_prompt.txt"
+    },
+    {
+      "name": "silly_song",
+      "prompt_template": "SONG: [Write a short, silly song about the events or characters in this call. Make it fun and lighthearted, and keep it under 8 lines. The transcript uses [LEFT] and [RIGHT] to indicate audio channels.] Transcript:\n{transcript}",
+      "output_file": "silly_song.txt"
+    }
+  ],
+  "lm_studio_model_identifier": "llama-3.1-8b-supernova-etherealhermes",
+  "lm_studio_base_url": "http://192.168.1.131:1234/v1",
+  "lm_studio_api_key": "lm-studio",
+  "lm_studio_temperature": 0.5,
+  "lm_studio_max_tokens": 250
+} 

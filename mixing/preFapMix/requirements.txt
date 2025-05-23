@@ -1,0 +1,28 @@
+# Core audio and processing
+pydub
+mutagen
+numpy
+librosa
+soundfile
+audiomentations
+audiosegment
+
+# LLM and API
+openai
+requests
+
+# ML/AI and audio annotation
+torch
+transformers
+pyannote.audio
+
+# CLI, config, and utility
+python-dotenv
+yt-dlp
+
+# Optional/advanced (if you use gradio UI or HuggingFace Hub)
+gradio
+huggingface_hub
+
+# Testing (if you run tests)
+pytest 

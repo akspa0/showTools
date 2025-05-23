@@ -1,0 +1,33 @@
+# Core dependencies
+torch>=2.0.0
+# For GPU, install torch/torchaudio with CUDA support from https://pytorch.org/get-started/locally/
+torchaudio>=2.0.0
+tqdm
+rich
+numpy
+soundfile
+mutagen
+pydub
+scipy
+colorama
+pyyaml
+
+# Hugging Face ecosystem
+transformers>=4.30.0
+datasets
+huggingface_hub
+
+# CLAP (audio event detection)
+# (CLAP is available via transformers >=4.30.0)
+
+# Parakeet ASR (NVIDIA NeMo)
+nemo_toolkit[asr]>=1.22.0
+
+# Whisper ASR
+openai-whisper
+
+# If you use Jupyter or notebooks
+ipython
+
+# Optional: for logging, YAML config, etc.
+# pyyaml, colorama already included 

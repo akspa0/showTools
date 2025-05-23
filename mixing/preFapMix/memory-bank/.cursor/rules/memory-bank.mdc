@@ -1,0 +1,10 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+## Pattern: Final Output Builder as Last Step
+- The final_output_builder.py is always invoked as the last step of the pipeline.
+- It produces a robust, user-facing output folder with all required files, metadata, and a zipped archive.
+- All lineage, tagging, and extensibility requirements are met.
+- Next focus: advanced content moderation, show-level LLM synopses, and UI integration for LLM tasks.

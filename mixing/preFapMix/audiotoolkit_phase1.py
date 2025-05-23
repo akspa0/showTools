@@ -19,14 +19,14 @@ from audiomentations import Compose, LoudnessNormalization, Gain, Limiter
 # Consider making logging more configurable later via a setup function
 
 # --- Constants ---
-TARGET_LUFS = -6.0
+TARGET_LUFS = -12.0
 MIX_SAMPLE_RATE = 44100 # Target sample rate for mixing
 TONES_FILE_PATH = "tones.wav" # Assuming it's in the workspace root
 DEFAULT_SEPARATOR_MODEL = "mel_band_roformer_vocals_fv4_gabox.ckpt"
-DEFAULT_VOCAL_STEM_TARGET_LUFS = 0.0 # User confirmed optimal default
+DEFAULT_VOCAL_STEM_TARGET_LUFS = -12.0 # User confirmed optimal default
 DEFAULT_INSTRUMENTAL_STEM_TARGET_LUFS = -14.0 # User confirmed optimal default
 DEFAULT_LIMITER_PEAK_DB = -0.5 # Target peak for vocal stem limiter if enhance_vocals is on
-DEFAULT_FINAL_TARGET_LUFS_FFMPEG = -8.0 # Target LUFS for the final mix using ffmpeg loudnorm
+DEFAULT_FINAL_TARGET_LUFS_FFMPEG = -12.0 # Target LUFS for the final mix using ffmpeg loudnorm
 
 TEMP_BASE_DIR = "temp_processing"
 FINAL_OUTPUT_DIR_PHASE1 = "phase1_processed_calls"
