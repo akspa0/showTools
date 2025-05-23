@@ -32,6 +32,9 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - **All job and file discovery for resume is based on anonymized, already-processed files in the output folder.**
 - **Status and resume commands (`--show-resume-status`, `--stage-status`) now operate on the output folder, never on the original input.**
 - **The pipeline no longer leaks PII in logs or console output during resume or status checks.**
+- **PRIMARY: Implementing CLAP-based call segmentation logic for --call-cutter (flag present, segmentation logic pending).**
+- **SECONDARY: LLM task completion issue (tasks running after pipeline completion message) is under investigation.**
+- **Memory bank is being updated as a secondary priority to --call-cutter work.**
 
 ## Recent Changes
 
@@ -54,20 +57,22 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 
 ## Next Steps
 
-- **Immediate: Enhanced error handling and edge cases for resume functionality**
-- **Next: Advanced resume controls (--resume-from, --force-rerun, --clear-from)**
-- **Then: Real-world integration testing with actual audio files**
-- **Future: Performance monitoring and stage timing analytics**
+- **Immediate: Implement CLAP-based call segmentation logic for --call-cutter (primary focus)**
+- **Secondary: Investigate and resolve LLM task completion issue (tasks running after pipeline completion message)**
+- Enhanced error handling and edge cases for resume functionality
+- Advanced resume controls (--resume-from, --force-rerun, --clear-from)
+- Real-world integration testing with actual audio files
+- Performance monitoring and stage timing analytics
 - Complete and test finalization stage for MP3 outputs and metadata
 - Ensure robust fallback logic for LLM output
 - Update documentation and memory bank as the project evolves
-- **Continue to monitor for any edge cases where PII could leak (e.g., error messages, stack traces).**
-- **Consider adding automated tests to verify no PII is ever output during resume/status operations.**
+- Continue to monitor for any edge cases where PII could leak (e.g., error messages, stack traces).
+- Consider adding automated tests to verify no PII is ever output during resume/status operations.
 
 ## Active Decisions & Considerations
 
-- **Resume functionality is production-ready but can be enhanced with granular controls**
-- **Debugging workflow dramatically improved - no more re-running expensive stages**
+- Resume functionality is production-ready but can be enhanced with granular controls
+- Debugging workflow dramatically improved - no more re-running expensive stages
 - All outputs and logs are strictly PII-free and fully auditable
 - User preferences and workflow logic are extensible via CLI and workflow JSONs
 - Defensive programming and robust error handling are required at every stage
@@ -75,4 +80,4 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Show description is included in manifest, ID3 tags, and as a separate .txt file
 - All soundbites are converted to MP3 with full metadata and included in finalized/soundbites/
 
-## Current Focus: Enhanced error handling and granular resume controls for production robustness 
+## Current Focus: Implementing CLAP-based call segmentation logic for --call-cutter (primary); LLM task completion issue under investigation (secondary) 

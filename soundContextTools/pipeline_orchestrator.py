@@ -1263,6 +1263,51 @@ class PipelineOrchestrator:
         self.run_remix_stage(call_tones=call_tones)
         self.run_show_stage(call_tones=call_tones)
         self.run_finalization_stage()
+        # Print a clear success message
+        print("\n\033[92m🎉🎉 Pipeline completed successfully! All outputs are ready. 🎉🎉\033[0m\n")
+
+    def run_with_resume(self, call_tones=False, resume=True, resume_from=None):
+        # Add resume functionality to orchestrator
+        add_resume_to_orchestrator(self, resume_mode=True)
+        # Print resume summary at start
+        print_resume_status(self.run_folder, detailed=True)
+        # Define all stages with their methods
+        stages_and_methods = [
+            ('ingestion', self._run_ingestion_jobs),
+            ('separation', lambda: (self.add_separation_jobs(), self.run_audio_separation_stage())),
+            ('normalization', self.run_normalization_stage),
+            ('true_peak_normalization', self.run_true_peak_normalization_stage),
+            ('clap', self.run_clap_annotation_stage),
+            ('diarization', self.run_diarization_stage),
+            ('segmentation', self.run_speaker_segmentation_stage),
+            ('resampling', self.run_resample_segments_stage),
+            ('transcription', lambda: self.run_transcription_stage(asr_engine='parakeet')),
+            ('soundbite_renaming', self.run_rename_soundbites_stage),
+            ('soundbite_finalization', self.run_final_soundbite_stage),
+            ('llm', self.run_llm_stage),
+            ('remix', lambda: self.run_remix_stage(call_tones=call_tones)),
+            ('show', lambda: self.run_show_stage(call_tones=call_tones)),
+            ('finalization', self.run_finalization_stage)
+        ]
+        # Run each stage with resume support
+        for stage_name, stage_method in stages_and_methods:
+            try:
+                run_stage_with_resume(self, stage_name, stage_method, resume_from)
+            except Exception as e:
+                self.log_event('ERROR', f'pipeline_failed_at_stage', {
+                    'stage': stage_name,
+                    'error': str(e)
+                })
+                console.print(f"\n[bold red]Pipeline failed at stage: {stage_name}[/]")
+                console.print(f"[red]Error: {e}[/]")
+                console.print(f"\n[yellow]To resume from this point, run with --resume[/]")
+                raise
+        # Write final manifest and log
+        self.write_manifest()
+        self.write_log()
+        # Final summary
+        print("\n\033[92m🎉🎉 Pipeline completed successfully! All outputs are ready. 🎉🎉\033[0m\n")
+        print_resume_status(self.run_folder, detailed=True)
 
     def _run_ingestion_jobs(self):
         """Helper method for ingestion stage that can be used with resume functionality"""
@@ -1331,55 +1376,6 @@ class PipelineOrchestrator:
         self.enable_logging()
         self.write_log()
         self.write_manifest()
-
-    def run_with_resume(self, call_tones=False, resume=True, resume_from=None):
-        """Enhanced pipeline run method with resume functionality"""
-        # Add resume functionality to orchestrator
-        add_resume_to_orchestrator(self, resume_mode=True)
-        
-        # Print resume summary at start
-        print_resume_status(self.run_folder, detailed=True)
-        
-        # Define all stages with their methods
-        stages_and_methods = [
-            ('ingestion', self._run_ingestion_jobs),
-            ('separation', lambda: (self.add_separation_jobs(), self.run_audio_separation_stage())),
-            ('normalization', self.run_normalization_stage),
-            ('true_peak_normalization', self.run_true_peak_normalization_stage),
-            ('clap', self.run_clap_annotation_stage),
-            ('diarization', self.run_diarization_stage),
-            ('segmentation', self.run_speaker_segmentation_stage),
-            ('resampling', self.run_resample_segments_stage),
-            ('transcription', lambda: self.run_transcription_stage(asr_engine='parakeet')),
-            ('soundbite_renaming', self.run_rename_soundbites_stage),
-            ('soundbite_finalization', self.run_final_soundbite_stage),
-            ('llm', self.run_llm_stage),
-            ('remix', lambda: self.run_remix_stage(call_tones=call_tones)),
-            ('show', lambda: self.run_show_stage(call_tones=call_tones)),
-            ('finalization', self.run_finalization_stage)
-        ]
-        
-        # Run each stage with resume support
-        for stage_name, stage_method in stages_and_methods:
-            try:
-                run_stage_with_resume(self, stage_name, stage_method, resume_from)
-            except Exception as e:
-                self.log_event('ERROR', f'pipeline_failed_at_stage', {
-                    'stage': stage_name,
-                    'error': str(e)
-                })
-                console.print(f"\n[bold red]Pipeline failed at stage: {stage_name}[/]")
-                console.print(f"[red]Error: {e}[/]")
-                console.print(f"\n[yellow]To resume from this point, run with --resume[/]")
-                raise
-        
-        # Write final manifest and log
-        self.write_manifest()
-        self.write_log()
-        
-        # Final summary
-        console.print("\n[bold green]🎉 Pipeline completed successfully![/]")
-        print_resume_status(self.run_folder, detailed=True)
 
     def log_and_manifest(self, stage, call_id=None, input_files=None, output_files=None, params=None, metadata=None, event='file_written', result='success', error=None):
         """
@@ -1524,6 +1520,7 @@ if __name__ == '__main__':
     parser.add_argument('--llm_config', type=str, default=None, help='Path to LLM task config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--llm-seed', type=int, default=None, help='Global seed for LLM tasks (default: random per task)')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to end of each call and between calls in show file')
+    parser.add_argument('--call-cutter', action='store_true', help='Enable CLAP-based call segmentation for single-file inputs (experimental)')
     # Resume functionality arguments
     parser.add_argument('--resume', action='store_true', help='Enable resume functionality - skip completed stages')
     parser.add_argument('--resume-from', type=str, metavar='STAGE', help='Resume from a specific stage (skip all prior completed stages)')
@@ -1540,7 +1537,8 @@ if __name__ == '__main__':
         "\nValid stage names for --resume-from, --force-rerun, --clear-from, --stage-status:\n  " + ", ".join(STAGE_LIST) +
         "\n\nExample: --resume-from diarization\n" +
         "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n" +
-        "\nUse --llm-seed to set a global seed for LLM tasks (default: random per task).\n"
+        "\nUse --llm-seed to set a global seed for LLM tasks (default: random per task).\n" +
+        "\nUse --call-cutter to enable CLAP-based call segmentation for single-file inputs (experimental).\n"
     )
 
     args = parser.parse_args()

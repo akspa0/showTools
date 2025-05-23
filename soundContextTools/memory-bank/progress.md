@@ -34,19 +34,21 @@ Tracks what works, what's left to build, current status, and known issues.
 
 ## What's Left to Build
 
-- **Enhanced error handling and edge cases for resume functionality**
+- **PRIMARY: Implement CLAP-based call segmentation logic for --call-cutter (flag present, segmentation logic pending)**
+- **SECONDARY: Investigate and resolve LLM task completion issue (tasks running after pipeline completion message)**
+- Enhanced error handling and edge cases for resume functionality
   - Corrupted state file recovery
   - Partial stage completion detection
   - State validation and migration
-- **Advanced resume controls**
+- Advanced resume controls
   - `--resume-from STAGE` - Resume from specific stage
   - `--force-rerun STAGE` - Force re-run specific stages
   - `--clear-from STAGE` - Clear completion from stage onwards
-- **Real-world integration testing**
+- Real-world integration testing
   - Test with actual audio file sets
   - Validate resume consistency across real pipeline runs
   - Performance benchmarking
-- **Performance monitoring enhancements**
+- Performance monitoring enhancements
   - Stage duration tracking and analysis
   - Memory usage monitoring
   - Progress estimation for remaining work
@@ -62,9 +64,13 @@ Tracks what works, what's left to build, current status, and known issues.
 
 Pipeline is fully functional, privacy-focused, robust, and extensible. Resume functionality dramatically improves debugging workflow. Ready for enhanced error handling and advanced controls.
 
+**PRIMARY: CLAP-based call segmentation logic for --call-cutter is the next major feature (flag present, segmentation logic pending).**
+**SECONDARY: LLM task completion issue (tasks running after pipeline completion message) is under investigation.**
+**Memory bank is being updated as a secondary priority to --call-cutter work.**
+
 ## Known Issues
 
-- **None for core resume functionality** (all tests passing)
+- **LLM task completion issue:** LLM tasks are sometimes executed after the pipeline completion message; this is under investigation.
 - Resume controls could be more granular (next enhancement)
 - Need real-world testing with actual audio files
 - Performance monitoring would be valuable addition

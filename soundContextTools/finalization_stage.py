@@ -151,7 +151,6 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     for call_dir in soundbites_root.iterdir():
         if not call_dir.is_dir():
             continue
-        master_transcript_lines = []
         master_transcript_events = []
         # Gather CLAP events for this call (confidence >= 0.9)
         clap_events = []
@@ -173,7 +172,7 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                                 })
                     except Exception:
                         continue
-        # Gather utterances
+        # Gather utterances and finalize soundbites (including single-file jobs)
         for channel_dir in call_dir.iterdir():
             if not channel_dir.is_dir():
                 continue
@@ -182,6 +181,8 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                 if not speaker_dir.is_dir():
                     continue
                 speaker_label = speaker_dir.name.upper()
+                out_speaker_dir = soundbites_dir / call_dir.name / channel_dir.name / speaker_dir.name
+                out_speaker_dir.mkdir(parents=True, exist_ok=True)
                 for wav_file in speaker_dir.glob('*.wav'):
                     base = wav_file.stem
                     txt_file = wav_file.with_suffix('.txt')
@@ -191,15 +192,26 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                         transcript = f.read().strip()
                     if not transcript:
                         continue
-                    # Try to extract timestamp from filename (format: idx-start-end)
                     parts = base.split('-')
                     try:
                         start = float(parts[1])/100 if len(parts) > 1 else 0
+                        end = float(parts[2])/100 if len(parts) > 2 else 0
                     except Exception:
                         start = 0
+                        end = 0
+                    mp3_name = sanitize_filename(base) + '.mp3'
+                    mp3_path = out_speaker_dir / mp3_name
+                    wav_to_mp3(wav_file, mp3_path)
+                    embed_id3(mp3_path, {
+                        'title': transcript,
+                        'album': 'Audio Context Soundbites',
+                        'comment': f"{channel_dir.name} {speaker_dir.name} from {call_dir.name}; file: {wav_file.name}; start: {start:.2f}; end: {end:.2f}",
+                    })
+                    out_txt_path = out_speaker_dir / (sanitize_filename(base) + '.txt')
+                    shutil.copy2(txt_file, out_txt_path)
+                    # Add to master transcript (utterance: no type field in JSON)
                     line = f"[{channel_label}][{speaker_label}][{start:.2f}]: {transcript}"
                     master_transcript_events.append({
-                        'type': 'utterance',
                         'timestamp': start,
                         'text': line
                     })
