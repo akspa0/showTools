@@ -8,9 +8,10 @@ import shutil
 import json
 import glob
 import subprocess
+import datetime
+import re
 
 def sanitize_filename(name, max_length=48):
-    import re
     name = name.strip().replace(' ', '_')
     name = re.sub(r'[^A-Za-z0-9_\-]', '', name)
     return name[:max_length] or 'untitled'
@@ -110,14 +111,16 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     call_entries = [e for e in manifest if e.get('stage') == 'remix']
     for entry in call_entries:
         call_id = entry.get('call_id')
-        wav_path = Path(entry['output_files'][0]) if entry.get('output_files') else None
+        wav_path = Path(entry.get('output_files')[0]) if entry.get('output_files') else None
         call_title = call_id
         call_title_path = llm_dir / call_id / 'call_title.txt'
         if call_title_path.exists():
             with open(call_title_path, 'r', encoding='utf-8') as f:
-                title = f.read().strip().strip('"')
-                if title:
-                    call_title = title
+                lines = [line.strip().strip('"') for line in f.read().splitlines() if line.strip()]
+                if lines:
+                    call_title = lines[0]
+                    # Remove commentary starting with 'This title' (case-insensitive)
+                    call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
         mp3_name = sanitize_filename(call_title) + '.mp3'
         mp3_path = calls_dir / mp3_name
         if wav_path and wav_path.exists():
@@ -173,8 +176,11 @@ def run_finalization_stage(run_folder: Path, manifest: list):
         end_time = entry.get('end_time')
         embed_lineage_id3(show_mp3, original_title, start_time, end_time)
     # --- 3. Show TXT ---
+    def format_hms(seconds):
+        return str(datetime.timedelta(seconds=int(seconds)))
     show_txt = show_dir / (show_title + '.txt')
     timeline = []
+    call_titles = []
     if show_json.exists():
         with open(show_json, 'r', encoding='utf-8') as f:
             timeline = json.load(f)
@@ -186,9 +192,240 @@ def run_finalization_stage(run_folder: Path, manifest: list):
         f.write("Call Timeline:\n")
         for entry in timeline:
             if 'call_title' in entry:
-                f.write(f"- {entry['call_title']} ({entry['start']:.2f}s - {entry['end']:.2f}s)\n")
+                call_title = entry['call_title']
+                call_id = entry.get('call_id')
+                call_title_path = llm_dir / call_id / 'call_title.txt'
+                if call_title_path.exists():
+                    with open(call_title_path, 'r', encoding='utf-8') as tf:
+                        lines = [line.strip().strip('"') for line in tf.read().splitlines() if line.strip()]
+                        if lines:
+                            call_title = lines[0]
+                            call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+                call_titles.append(call_title)
+                start = format_hms(entry['start'])
+                end = format_hms(entry['end'])
+                f.write(f"🎙️ {call_title} ({start} - {end})\n")
             elif 'tones' in entry:
-                f.write(f"- [Tones] ({entry['start']:.2f}s - {entry['end']:.2f}s)\n")
+                start = format_hms(entry['start'])
+                end = format_hms(entry['end'])
+                f.write(f"🔔 [Tones] ({start} - {end})\n")
+    # --- 3b. Show Notes LLM Task ---
+    # Compose prompt for show notes
+    show_notes_prompt = (
+        "Given the following list of call titles, write a short, whimsical, and absurdist set of show notes that "
+        "captures the comedic and surreal nature of the calls. Be cheery, playful, and concise. Do not repeat the call titles verbatim, "
+        "but reference the themes and energy of the show.\n\nCall Titles:\n" + '\n'.join(f'- {title}' for title in call_titles)
+    )
+    show_notes_txt = show_dir / 'show-notes.txt'
+    # Run LLM for show notes (reuse LLM config from orchestrator if available)
+    llm_config_path = run_folder / 'workflows' / 'llm_tasks.json'
+    llm_config = None
+    if llm_config_path.exists():
+        with open(llm_config_path, 'r', encoding='utf-8') as f:
+            llm_config = json.load(f)
+    if llm_config:
+        import requests, random, hashlib
+        base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+        api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+        model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+        temperature = llm_config.get('lm_studio_temperature', 0.5)
+        max_tokens = llm_config.get('lm_studio_max_tokens', 250)
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        seed_input = f"show_notes_{show_title}"
+        seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+        data = {
+            "model": model_id,
+            "messages": [
+                {"role": "user", "content": show_notes_prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "seed": seed
+        }
+        try:
+            response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+            if response.status_code == 200:
+                result = response.json()
+                content = result['choices'][0]['message']['content'].strip()
+                with open(show_notes_txt, 'w', encoding='utf-8') as nf:
+                    nf.write(content)
+                    nf.write("\n\n---\n\n")
+                    nf.write("Call Timeline:\n")
+                    for entry in timeline:
+                        if 'call_title' in entry:
+                            call_title = entry['call_title']
+                            call_id = entry.get('call_id')
+                            call_title_path = llm_dir / call_id / 'call_title.txt'
+                            if call_title_path.exists():
+                                with open(call_title_path, 'r', encoding='utf-8') as tf:
+                                    lines = [line.strip().strip('"') for line in tf.read().splitlines() if line.strip()]
+                                    if lines:
+                                        call_title = lines[0]
+                            start = format_hms(entry['start'])
+                            end = format_hms(entry['end'])
+                            nf.write(f"🎙️ {call_title} ({start} - {end})\n")
+                        elif 'tones' in entry:
+                            start = format_hms(entry['start'])
+                            end = format_hms(entry['end'])
+                            nf.write(f"🔔 [Tones] ({start} - {end})\n")
+        except Exception as e:
+            with open(show_notes_txt, 'w', encoding='utf-8') as nf:
+                nf.write(f"[ERROR] Failed to generate show notes: {e}\n")
+    # --- 3c. Safe-for-Work Call Titles LLM Task ---
+    for entry in timeline:
+        if 'call_title' in entry:
+            call_id = entry.get('call_id')
+            call_title_path = llm_dir / call_id / 'call_title.txt'
+            transcript_path = soundbites_dir / call_id / 'master_transcript.txt'
+            sfw_title_path = llm_dir / call_id / 'call_title_sfw.txt'
+            if call_title_path.exists() and transcript_path.exists():
+                with open(call_title_path, 'r', encoding='utf-8') as f:
+                    lines = [line.strip().strip('"') for line in f.read().splitlines() if line.strip()]
+                    if lines:
+                        orig_title = lines[0]
+                        orig_title = re.split(r'(?i)\bthis title\b', orig_title)[0].strip()
+                with open(transcript_path, 'r', encoding='utf-8') as tf:
+                    transcript = tf.read().strip()
+                sfw_prompt = (
+                    f"Given the following call title and transcript, generate a safe-for-work, family-friendly version of the call title. "
+                    f"Do not include any PII or inappropriate language.\n\nCall Title: {orig_title}\n\nTranscript:\n{transcript}"
+                )
+                if llm_config:
+                    import requests, random, hashlib
+                    base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+                    api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+                    model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+                    temperature = llm_config.get('lm_studio_temperature', 0.5)
+                    max_tokens = llm_config.get('lm_studio_max_tokens', 100)
+                    headers = {
+                        'Authorization': f'Bearer {api_key}',
+                        'Content-Type': 'application/json'
+                    }
+                    seed_input = f"sfw_title_{call_id}"
+                    seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+                    data = {
+                        "model": model_id,
+                        "messages": [
+                            {"role": "user", "content": sfw_prompt}
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "seed": seed
+                    }
+                    try:
+                        response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+                        if response.status_code == 200:
+                            result = response.json()
+                            content = result['choices'][0]['message']['content'].strip()
+                            # Remove commentary starting with 'This title' (case-insensitive)
+                            content = re.split(r'(?i)\bthis title\b', content)[0].strip()
+                            with open(sfw_title_path, 'w', encoding='utf-8') as sfwf:
+                                sfwf.write(content)
+                    except Exception as e:
+                        with open(sfw_title_path, 'w', encoding='utf-8') as sfwf:
+                            sfwf.write(f"[ERROR] Failed to generate SFW call title: {e}\n")
+    # --- 3d. Complete SFW Show TXT ---
+    complete_sfw_txt = show_dir / 'complete-show-sfw.txt'
+    with open(complete_sfw_txt, 'w', encoding='utf-8') as f:
+        f.write(f"Show Title: {show_title} (Safe for Work)\n")
+        if show_desc:
+            f.write(f"Show Description: {show_desc}\n\n")
+        f.write("Call Timeline:\n")
+        for entry in timeline:
+            if 'call_title' in entry:
+                call_id = entry.get('call_id')
+                sfw_title_path = llm_dir / call_id / 'call_title_sfw.txt'
+                call_title = None
+                if sfw_title_path.exists():
+                    with open(sfw_title_path, 'r', encoding='utf-8') as sfwf:
+                        lines = [line.strip().strip('"') for line in sfwf.read().splitlines() if line.strip()]
+                        if lines:
+                            call_title = lines[0]
+                            call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+                if not call_title:
+                    # fallback to original call title
+                    call_title_path = llm_dir / call_id / 'call_title.txt'
+                    if call_title_path.exists():
+                        with open(call_title_path, 'r', encoding='utf-8') as tf:
+                            lines = [line.strip().strip('"') for line in tf.read().splitlines() if line.strip()]
+                            if lines:
+                                call_title = lines[0]
+                                call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+                start = format_hms(entry['start'])
+                end = format_hms(entry['end'])
+                f.write(f"🎙️ {call_title} ({start} - {end})\n")
+            elif 'tones' in entry:
+                start = format_hms(entry['start'])
+                end = format_hms(entry['end'])
+                f.write(f"🔔 [Tones] ({start} - {end})\n")
+    # --- 3e. Append LLM Show Notes to Show TXT and SFW Show TXT ---
+    def append_llm_show_notes(call_titles, out_path):
+        show_notes_prompt = (
+            "Given the following list of call titles, write a concise, engaging set of show notes that summarizes the show for listeners. "
+            "Be playful, creative, and avoid repeating the call titles verbatim.\n\nCall Titles:\n" + '\n'.join(f'- {title}' for title in call_titles)
+        )
+        if llm_config:
+            import requests, random, hashlib
+            base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+            api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+            model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+            temperature = llm_config.get('lm_studio_temperature', 0.5)
+            max_tokens = llm_config.get('lm_studio_max_tokens', 250)
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            }
+            seed_input = f"show_notes_{out_path.name}"
+            seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+            data = {
+                "model": model_id,
+                "messages": [
+                    {"role": "user", "content": show_notes_prompt}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "seed": seed
+            }
+            try:
+                response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result['choices'][0]['message']['content'].strip()
+                    with open(out_path, 'a', encoding='utf-8') as f:
+                        f.write("\n\nShow Notes:\n")
+                        f.write(content)
+                        f.write("\n")
+            except Exception as e:
+                with open(out_path, 'a', encoding='utf-8') as f:
+                    f.write(f"\n[ERROR] Failed to generate show notes: {e}\n")
+    # Append to complete-show.txt (original call titles)
+    append_llm_show_notes(call_titles, show_txt)
+    # Append to complete-show-sfw.txt (SFW call titles if available, else fallback)
+    sfw_call_titles = []
+    for entry in timeline:
+        if 'call_title' in entry:
+            call_id = entry.get('call_id')
+            sfw_title_path = llm_dir / call_id / 'call_title_sfw.txt'
+            call_title = None
+            if sfw_title_path.exists():
+                with open(sfw_title_path, 'r', encoding='utf-8') as sfwf:
+                    lines = [line.strip().strip('"') for line in sfwf.read().splitlines() if line.strip()]
+                    if lines:
+                        call_title = lines[0]
+                        call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+            if not call_title:
+                call_title_path = llm_dir / call_id / 'call_title.txt'
+                if call_title_path.exists():
+                    with open(call_title_path, 'r', encoding='utf-8') as tf:
+                        lines = [line.strip().strip('"') for line in tf.read().splitlines() if line.strip()]
+                        if lines:
+                            call_title = lines[0]
+                            call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
+            sfw_call_titles.append(call_title)
+    append_llm_show_notes(sfw_call_titles, complete_sfw_txt)
     # --- 4. Soundbites ---
     soundbites_root = run_folder / 'soundbites'
     clap_root = run_folder / 'clap'
@@ -269,17 +506,4 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     # Retrieve start/end time for the soundbite (if available)
                     start_time = start
                     end_time = end
-                    embed_lineage_id3(mp3_path, original_title, start_time, end_time)
-        # Sort all events by timestamp
-        master_transcript_events_sorted = sorted(master_transcript_events, key=lambda x: x['timestamp'])
-        # Write .txt
-        master_txt_path = soundbites_dir / call_dir.name / 'master_transcript.txt'
-        master_txt_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(master_txt_path, 'w', encoding='utf-8') as f:
-            for ev in master_transcript_events_sorted:
-                f.write(ev['text'] + '\n')
-        # Write .json
-        master_json_path = soundbites_dir / call_dir.name / 'master_transcript.json'
-        master_json_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(master_json_path, 'w', encoding='utf-8') as f:
-            json.dump(master_transcript_events_sorted, f, indent=2, ensure_ascii=False) 
+                    embed_lineage_id3(mp3_path, original_title, start_time, end_time) 
