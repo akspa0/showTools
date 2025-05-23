@@ -7,6 +7,8 @@ import torch
 import torchaudio
 import re
 import numpy as np
+import soundfile as sf
+from shutil import copyfile
 
 def parse_anonymized_filename(filename):
     # Example: 0000-out-20250511-221253.wav
@@ -147,4 +149,102 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
                 'all_clap_events': [],
                 'error': error_msg
             })
-    return results 
+    return results
+
+def pair_clap_events(events, config, total_duration):
+    """
+    Pair start and end events using config parameters for robust segmentation.
+    Returns a list of (start, end) tuples.
+    """
+    start_prompt = config.get("start_prompt", "telephone ring tones")
+    end_prompt = config.get("end_prompt", "hang-up tones")
+    min_gap = config.get("min_gap_sec", 2.0)
+    min_call = config.get("min_call_duration_sec", 10.0)
+    noise_gap = config.get("noise_gap_sec", 1.5)
+    pairs = []
+    i = 0
+    n = len(events)
+    while i < n:
+        e = events[i]
+        if e["prompt"] == start_prompt:
+            start_time = e["start_time"]
+            # Find the next end_prompt after this start
+            j = i + 1
+            while j < n:
+                e2 = events[j]
+                if e2["prompt"] == end_prompt:
+                    end_time = e2["start_time"]
+                    # Ignore if too close (noise)
+                    if end_time - start_time < noise_gap:
+                        j += 1
+                        continue
+                    # Only accept if duration is long enough
+                    if end_time - start_time >= min_call:
+                        pairs.append((start_time, end_time))
+                        i = j  # Move to after this end
+                        break
+                j += 1
+            else:
+                # No end found, segment goes to file end
+                if total_duration - start_time >= min_call:
+                    pairs.append((start_time, total_duration))
+                i = n  # Done
+                break
+        i += 1
+    return pairs
+
+def segment_audio_with_clap(
+    audio_path: Path,
+    segmentation_config: dict,
+    output_dir: Path,
+    model_id: str = "laion/clap-htsat-unfused",
+    chunk_length_sec=5,
+    overlap_sec=2
+) -> list:
+    """
+    Segment a long audio file into calls using CLAP-based event detection and intelligent pairing.
+    Returns a list of segment metadata dicts.
+    """
+    prompts = segmentation_config.get("prompts", ["telephone ring tones", "hang-up tones"])
+    confidence_threshold = segmentation_config.get("confidence_threshold", 0.6)
+    min_segment_length = segmentation_config.get("min_segment_length_sec", 10)
+    padding = segmentation_config.get("segment_padding_sec", 0.5)
+
+    # Run CLAP event detection
+    events = run_clap_annotation(
+        audio_path,
+        prompts,
+        model_id=model_id,
+        chunk_length_sec=chunk_length_sec,
+        overlap_sec=overlap_sec,
+        confidence_threshold=confidence_threshold
+    )
+    # Only keep events with relevant prompts
+    start_prompt = segmentation_config.get("start_prompt", "telephone ring tones")
+    end_prompt = segmentation_config.get("end_prompt", "hang-up tones")
+    filtered_events = [e for e in events if e["prompt"] in (start_prompt, end_prompt)]
+    # Load audio
+    waveform, sr = torchaudio.load(str(audio_path))
+    total_duration = waveform.shape[1] / sr
+    # Pair events intelligently
+    pairs = pair_clap_events(filtered_events, segmentation_config, total_duration)
+    # Build segments
+    segments = []
+    for i, (seg_start, seg_end) in enumerate(pairs):
+        seg_start = max(0.0, seg_start - padding)
+        seg_end = min(total_duration, seg_end + padding)
+        if seg_end - seg_start < min_segment_length:
+            continue
+        seg_wave = waveform[:, int(seg_start * sr):int(seg_end * sr)]
+        seg_name = f"{audio_path.stem}-seg{i:04d}.wav"
+        seg_path = output_dir / seg_name
+        torchaudio.save(str(seg_path), seg_wave, sr)
+        segments.append({
+            "segment_index": i,
+            "start": seg_start,
+            "end": seg_end,
+            "output_path": str(seg_path),
+            "source_file": str(audio_path),
+            "events": [e for e in filtered_events if seg_start <= e["start_time"] < seg_end]
+        })
+    return segments 
