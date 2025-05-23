@@ -81,11 +81,13 @@ def run_clap_annotation(audio_path: Path, prompts: List[str], model_id: str = "l
             })
     return all_results
 
-def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List[str] = None, model=None, chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.5) -> List[Dict]:
+def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List[str] = None, model=None, chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.6) -> List[Dict]:
     """
     Annotate all 'out' files in renamed_dir using CLAP and save results in clap_dir.
     Uses the specified CLAP model (default: fused model).
     Skips and logs any files that are empty or unreadable.
+    Logs all CLAP events with confidence >= 0.6 to a clap.json per channel/file.
+    Only events with confidence >= 0.9 should be included in the master transcript.
     """
     if model is None:
         model = 'laion/clap-htsat-fused'  # Default to fused model
@@ -93,7 +95,8 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
     if prompts is None:
         prompts = [
             'dog barking', 'DTMF', 'ringing', 'yelling', 'music', 'laughter', 'crying', 'doorbell', 'car horn', 'applause', 'gunshot',
-            'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence'
+            'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence',
+            'telephone ring tones', 'telephone hang-up tones'
         ]
     if not renamed_dir.exists():
         print(f"⚠️  Renamed directory does not exist: {renamed_dir}")
@@ -113,14 +116,23 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
         out_dir.mkdir(parents=True, exist_ok=True)
         try:
             annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
+            # Log all events with confidence >= 0.6
+            all_clap_events = [a for a in annotations if a.get('confidence', 0) >= 0.6]
+            clap_json_path = out_dir / f'{channel}_clap.json'
+            with open(clap_json_path, 'w', encoding='utf-8') as f:
+                json.dump(all_clap_events, f, indent=2)
+            # Only keep events with confidence >= 0.9 for master transcript
+            high_conf_events = [a for a in annotations if a.get('confidence', 0) >= 0.9]
             ann_path = out_dir / 'clap_annotations.json'
             with open(ann_path, 'w', encoding='utf-8') as f:
-                json.dump(annotations, f, indent=2)
+                json.dump(high_conf_events, f, indent=2)
             results.append({
                 'call_id': call_id,
                 'input_name': file.name,
                 'annotation_path': str(ann_path),
-                'accepted_annotations': annotations
+                'clap_json_path': str(clap_json_path),
+                'accepted_annotations': high_conf_events,
+                'all_clap_events': all_clap_events
             })
         except Exception as e:
             # Log privacy-preserving error, skip file
@@ -130,7 +142,9 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
                 'call_id': call_id,
                 'input_name': file.name,
                 'annotation_path': None,
+                'clap_json_path': None,
                 'accepted_annotations': [],
+                'all_clap_events': [],
                 'error': error_msg
             })
     return results 

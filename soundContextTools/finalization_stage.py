@@ -146,50 +146,73 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             elif 'tones' in entry:
                 f.write(f"- [Tones] ({entry['start']:.2f}s - {entry['end']:.2f}s)\n")
     # --- 4. Soundbites ---
-    # Use files from soundbites/ directory (with transcription in filename)
     soundbites_root = run_folder / 'soundbites'
+    clap_root = run_folder / 'clap'
     for call_dir in soundbites_root.iterdir():
         if not call_dir.is_dir():
             continue
         master_transcript_lines = []
+        master_transcript_events = []
+        # Gather CLAP events for this call (confidence >= 0.9)
+        clap_events = []
+        clap_call_dir = clap_root / call_dir.name
+        if clap_call_dir.exists():
+            for clap_file in clap_call_dir.glob('*.json'):
+                with open(clap_file, 'r', encoding='utf-8') as f:
+                    try:
+                        clap_data = json.load(f)
+                        for event in clap_data:
+                            conf = event.get('confidence', 0)
+                            if conf >= 0.9:
+                                start = event.get('start_time', event.get('start', 0))
+                                label = event.get('prompt', event.get('label', 'unknown'))
+                                master_transcript_events.append({
+                                    'type': 'clap',
+                                    'timestamp': start,
+                                    'text': f"[Annotation][{start:.2f}]: {label}"
+                                })
+                    except Exception:
+                        continue
+        # Gather utterances
         for channel_dir in call_dir.iterdir():
             if not channel_dir.is_dir():
                 continue
+            channel_label = channel_dir.name.upper().replace('-VOCALS', '')
             for speaker_dir in channel_dir.iterdir():
                 if not speaker_dir.is_dir():
                     continue
-                # Output folder: finalized/soundbites/<call_id>/<channel>/<speaker>/
-                out_speaker_dir = soundbites_dir / call_dir.name / channel_dir.name / speaker_dir.name
-                out_speaker_dir.mkdir(parents=True, exist_ok=True)
+                speaker_label = speaker_dir.name.upper()
                 for wav_file in speaker_dir.glob('*.wav'):
                     base = wav_file.stem
                     txt_file = wav_file.with_suffix('.txt')
-                    # Only process if transcription exists
                     if not txt_file.exists():
-                        print(f"[WARN] Skipping soundbite (no transcription): {wav_file}")
                         continue
                     with open(txt_file, 'r', encoding='utf-8') as f:
                         transcript = f.read().strip()
                     if not transcript:
-                        print(f"[WARN] Skipping soundbite (empty transcription): {wav_file}")
                         continue
-                    # Build output name with transcription in filename
-                    mp3_name = sanitize_filename(base) + '.mp3'
-                    mp3_path = out_speaker_dir / mp3_name
-                    wav_to_mp3(wav_file, mp3_path)
-                    embed_id3(mp3_path, {
-                        'title': transcript,
-                        'album': 'Audio Context Soundbites',
-                        'comment': f"{channel_dir.name} {speaker_dir.name} from {call_dir.name}",
+                    # Try to extract timestamp from filename (format: idx-start-end)
+                    parts = base.split('-')
+                    try:
+                        start = float(parts[1])/100 if len(parts) > 1 else 0
+                    except Exception:
+                        start = 0
+                    line = f"[{channel_label}][{speaker_label}][{start:.2f}]: {transcript}"
+                    master_transcript_events.append({
+                        'type': 'utterance',
+                        'timestamp': start,
+                        'text': line
                     })
-                    # Copy transcript .txt alongside .mp3
-                    out_txt_path = out_speaker_dir / (sanitize_filename(base) + '.txt')
-                    shutil.copy2(txt_file, out_txt_path)
-                    # Add to master transcript
-                    master_transcript_lines.append(f"[{channel_dir.name}][{speaker_dir.name}] {transcript}")
-        # Write master transcript for this call
-        if master_transcript_lines:
-            master_txt_path = soundbites_dir / call_dir.name / 'master_transcript.txt'
-            with open(master_txt_path, 'w', encoding='utf-8') as f:
-                for line in master_transcript_lines:
-                    f.write(line + '\n') 
+        # Sort all events by timestamp
+        master_transcript_events_sorted = sorted(master_transcript_events, key=lambda x: x['timestamp'])
+        # Write .txt
+        master_txt_path = soundbites_dir / call_dir.name / 'master_transcript.txt'
+        master_txt_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(master_txt_path, 'w', encoding='utf-8') as f:
+            for ev in master_transcript_events_sorted:
+                f.write(ev['text'] + '\n')
+        # Write .json
+        master_json_path = soundbites_dir / call_dir.name / 'master_transcript.json'
+        master_json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(master_json_path, 'w', encoding='utf-8') as f:
+            json.dump(master_transcript_events_sorted, f, indent=2, ensure_ascii=False) 

@@ -1381,6 +1381,34 @@ class PipelineOrchestrator:
         console.print("\n[bold green]🎉 Pipeline completed successfully![/]")
         print_resume_status(self.run_folder, detailed=True)
 
+    def log_and_manifest(self, stage, call_id=None, input_files=None, output_files=None, params=None, metadata=None, event='file_written', result='success', error=None):
+        """
+        Helper to log and add manifest entry for any file operation.
+        """
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'stage': stage,
+            'call_id': call_id,
+            'input_files': input_files,
+            'output_files': output_files,
+            'params': params,
+            'metadata': metadata,
+            'result': result,
+            'error': error
+        }
+        self.log_event('INFO' if result == 'success' else 'ERROR', event, entry)
+        manifest_entry = {
+            'stage': stage,
+            'call_id': call_id,
+            'input_files': input_files,
+            'output_files': output_files,
+            'params': params,
+            'metadata': metadata,
+            'result': result,
+            'error': error
+        }
+        self.manifest.append(manifest_entry)
+
 def create_jobs_from_input(input_path: Path) -> List[Job]:
     """Create jobs from input path (can be a single file or directory)
     IMPORTANT: No PII (original filenames or paths) may be printed or logged here! Only output anonymized counts if needed.
