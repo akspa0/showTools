@@ -146,29 +146,50 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             elif 'tones' in entry:
                 f.write(f"- [Tones] ({entry['start']:.2f}s - {entry['end']:.2f}s)\n")
     # --- 4. Soundbites ---
-    soundbite_entries = [e for e in manifest if e.get('stage') == 'final_soundbite']
-    for entry in soundbite_entries:
-        wav_path = Path(entry.get('soundbite_wav')) if entry.get('soundbite_wav') else None
-        transcript = entry.get('transcript')
-        call_id = entry.get('call_id')
-        channel = entry.get('channel')
-        speaker = entry.get('speaker')
-        start = entry.get('start')
-        end = entry.get('end')
-        input_name = entry.get('input_files', [None])[0]
-        if input_name:
-            input_name = Path(input_name).stem
-        # Defensive: skip if start or end is None
-        if start is None or end is None:
-            print(f"[WARN] Skipping soundbite with missing start/end: {entry}")
+    # Use files from soundbites/ directory (with transcription in filename)
+    soundbites_root = run_folder / 'soundbites'
+    for call_dir in soundbites_root.iterdir():
+        if not call_dir.is_dir():
             continue
-        mp3_name = f"{call_id}_{channel}_{speaker}_{int(start*100):06d}_{int(end*100):06d}.mp3"
-        mp3_path = soundbites_dir / mp3_name
-        if wav_path and wav_path.exists():
-            wav_to_mp3(wav_path, mp3_path)
-            embed_id3(mp3_path, {
-                'title': transcript or mp3_name,
-                'tracknumber': call_id,
-                'album': 'Audio Context Soundbites',
-                'comment': f"{channel} {speaker} {start:.2f}-{end:.2f}s from {input_name}",
-            }) 
+        master_transcript_lines = []
+        for channel_dir in call_dir.iterdir():
+            if not channel_dir.is_dir():
+                continue
+            for speaker_dir in channel_dir.iterdir():
+                if not speaker_dir.is_dir():
+                    continue
+                # Output folder: finalized/soundbites/<call_id>/<channel>/<speaker>/
+                out_speaker_dir = soundbites_dir / call_dir.name / channel_dir.name / speaker_dir.name
+                out_speaker_dir.mkdir(parents=True, exist_ok=True)
+                for wav_file in speaker_dir.glob('*.wav'):
+                    base = wav_file.stem
+                    txt_file = wav_file.with_suffix('.txt')
+                    # Only process if transcription exists
+                    if not txt_file.exists():
+                        print(f"[WARN] Skipping soundbite (no transcription): {wav_file}")
+                        continue
+                    with open(txt_file, 'r', encoding='utf-8') as f:
+                        transcript = f.read().strip()
+                    if not transcript:
+                        print(f"[WARN] Skipping soundbite (empty transcription): {wav_file}")
+                        continue
+                    # Build output name with transcription in filename
+                    mp3_name = sanitize_filename(base) + '.mp3'
+                    mp3_path = out_speaker_dir / mp3_name
+                    wav_to_mp3(wav_file, mp3_path)
+                    embed_id3(mp3_path, {
+                        'title': transcript,
+                        'album': 'Audio Context Soundbites',
+                        'comment': f"{channel_dir.name} {speaker_dir.name} from {call_dir.name}",
+                    })
+                    # Copy transcript .txt alongside .mp3
+                    out_txt_path = out_speaker_dir / (sanitize_filename(base) + '.txt')
+                    shutil.copy2(txt_file, out_txt_path)
+                    # Add to master transcript
+                    master_transcript_lines.append(f"[{channel_dir.name}][{speaker_dir.name}] {transcript}")
+        # Write master transcript for this call
+        if master_transcript_lines:
+            master_txt_path = soundbites_dir / call_dir.name / 'master_transcript.txt'
+            with open(master_txt_path, 'w', encoding='utf-8') as f:
+                for line in master_transcript_lines:
+                    f.write(line + '\n') 

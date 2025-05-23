@@ -21,6 +21,8 @@ from collections import defaultdict
 from finalization_stage import run_finalization_stage
 # --- Resume functionality imports ---
 from resume_utils import add_resume_to_orchestrator, run_stage_with_resume, should_resume_pipeline, print_resume_status, print_stage_status
+import random
+import hashlib
 
 rich_traceback_install()
 console = Console()
@@ -53,6 +55,7 @@ class PipelineOrchestrator:
         self._logging_enabled = False                # Only enable after PII is gone
         self.asr_engine = asr_engine
         self.llm_config_path = llm_config_path
+        self.global_llm_seed = None
     def add_job(self, job: Job):
         self.jobs.append(job)
     def log_event(self, level, event, details=None):
@@ -781,12 +784,7 @@ class PipelineOrchestrator:
         soundbites_dir = self.run_folder / 'soundbites'
         return soundbites_dir / call_id / f"{call_id}_master_transcript.txt"
 
-    def run_llm_task_for_call(self, call_id, master_transcript, llm_config, output_dir, llm_tasks):
-        """
-        For a given call, run all LLM tasks using the master transcript and config.
-        Sends each prompt to the LLM API and writes output to output_dir.
-        Returns a dict of output file paths.
-        """
+    def run_llm_task_for_call(self, call_id, master_transcript, llm_config, output_dir, llm_tasks, global_llm_seed=None):
         import requests
         import json
         output_paths = {}
@@ -806,13 +804,21 @@ class PipelineOrchestrator:
             prompt_template = task.get('prompt_template', '')
             output_file = task.get('output_file', f'{name}.txt')
             prompt = prompt_template.format(transcript=transcript)
+            # Determine seed
+            if global_llm_seed is not None:
+                # Deterministic per-task seed from global seed, call_id, and task name
+                seed_input = f"{global_llm_seed}_{call_id}_{name}"
+                seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+            else:
+                seed = random.randint(0, 2**32-1)
             data = {
                 "model": model_id,
                 "messages": [
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": temperature,
-                "max_tokens": max_tokens
+                "max_tokens": max_tokens,
+                "seed": seed  # Pass seed if LLM API supports it
             }
             out_path = output_dir / output_file
             try:
@@ -828,22 +834,17 @@ class PipelineOrchestrator:
                     with open(out_path, 'w', encoding='utf-8') as f:
                         f.write(error_msg)
                     output_paths[name] = str(out_path)
-                    self.log_event('ERROR', 'llm_api_error', {'call_id': call_id, 'task': name, 'status': response.status_code, 'text': response.text})
+                    self.log_event('ERROR', 'llm_api_error', {'call_id': call_id, 'task': name, 'status': response.status_code, 'text': response.text, 'seed': seed})
             except Exception as e:
                 with open(out_path, 'w', encoding='utf-8') as f:
                     f.write(f"LLM request failed: {e}")
                 output_paths[name] = str(out_path)
-                self.log_event('ERROR', 'llm_request_failed', {'call_id': call_id, 'task': name, 'error': str(e)})
+                self.log_event('ERROR', 'llm_request_failed', {'call_id': call_id, 'task': name, 'error': str(e), 'seed': seed})
+            # Always log the seed used
+            self.log_event('INFO', 'llm_task_seed', {'call_id': call_id, 'task': name, 'seed': seed, 'output_file': str(out_path)})
         return output_paths
 
     def run_llm_stage(self, llm_config_path=None):
-        """
-        Run LLM tasks for each call using the master transcript as input.
-        LLM tasks are defined in workflows/llm_tasks.json by default, or can be overridden via llm_config_path.
-        For each call, for each LLM task, the response is saved to output/<run_id>/llm/<call_id>/<output_file>.
-        Manifest is updated with LLM output paths and prompt lineage.
-        Logs every file written and updates manifest.
-        """
         import json
         from pathlib import Path
         if llm_config_path is None:
@@ -873,7 +874,8 @@ class PipelineOrchestrator:
                 master_transcript=master_transcript,
                 llm_config=llm_config,
                 output_dir=call_llm_dir,
-                llm_tasks=llm_tasks
+                llm_tasks=llm_tasks,
+                global_llm_seed=self.global_llm_seed
             )
             for task in llm_tasks:
                 name = task.get('name', 'unnamed_task')
@@ -884,40 +886,12 @@ class PipelineOrchestrator:
                     call_id=call_id,
                     input_files=[str(master_transcript)],
                     output_files=[str(output_path)],
-                    params={'task': name, 'prompt_template': task.get('prompt_template')},
+                    params={'task': name, 'prompt_template': task.get('prompt_template'), 'seed': output_paths.get('seed', None)},
                     metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
                     event='llm_task',
                     result='success'
                 )
             self.log_event('INFO', 'llm_tasks_complete', {'call_id': call_id, 'llm_outputs': output_paths})
-
-    def log_and_manifest(self, stage, call_id=None, input_files=None, output_files=None, params=None, metadata=None, event='file_written', result='success', error=None):
-        """
-        Helper to log and add manifest entry for any file operation.
-        """
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'stage': stage,
-            'call_id': call_id,
-            'input_files': input_files,
-            'output_files': output_files,
-            'params': params,
-            'metadata': metadata,
-            'result': result,
-            'error': error
-        }
-        self.log_event('INFO' if result == 'success' else 'ERROR', event, entry)
-        manifest_entry = {
-            'stage': stage,
-            'call_id': call_id,
-            'input_files': input_files,
-            'output_files': output_files,
-            'params': params,
-            'metadata': metadata,
-            'result': result,
-            'error': error
-        }
-        self.manifest.append(manifest_entry)
 
     def run_normalization_stage(self):
         """
@@ -1520,6 +1494,7 @@ if __name__ == '__main__':
     parser.add_argument('--output-folder', type=str, help='Existing output folder to resume from (e.g., outputs/run-20250522-211044)')
     parser.add_argument('--asr_engine', type=str, choices=['parakeet', 'whisper'], default='parakeet', help='ASR engine to use for transcription (default: parakeet)')
     parser.add_argument('--llm_config', type=str, default=None, help='Path to LLM task config JSON (default: workflows/llm_tasks.json)')
+    parser.add_argument('--llm-seed', type=int, default=None, help='Global seed for LLM tasks (default: random per task)')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to end of each call and between calls in show file')
     # Resume functionality arguments
     parser.add_argument('--resume', action='store_true', help='Enable resume functionality - skip completed stages')
@@ -1536,7 +1511,8 @@ if __name__ == '__main__':
     parser.epilog = (
         "\nValid stage names for --resume-from, --force-rerun, --clear-from, --stage-status:\n  " + ", ".join(STAGE_LIST) +
         "\n\nExample: --resume-from diarization\n" +
-        "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n"
+        "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n" +
+        "\nUse --llm-seed to set a global seed for LLM tasks (default: random per task).\n"
     )
 
     args = parser.parse_args()
