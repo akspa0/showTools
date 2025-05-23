@@ -258,7 +258,7 @@ class PipelineOrchestrator:
         fused_clap_model = 'laion/clap-htsat-fused'
         results = annotate_clap_for_out_files(
             renamed_dir, clap_dir, prompts,
-            model=fused_clap_model,
+            model_id=fused_clap_model,
             chunk_length_sec=chunk_length_sec,
             overlap_sec=overlap_sec,
             confidence_threshold=confidence_threshold
@@ -1306,22 +1306,96 @@ class PipelineOrchestrator:
     def run_single_file_workflow(self):
         # Full pipeline for single-file mode
         self._run_ingestion_jobs()
-        self.add_separation_jobs()
-        self.run_audio_separation_stage()
-        self.run_normalization_stage()
-        self.run_true_peak_normalization_stage()
-        self.run_clap_segmentation_stage()
-        self.run_clap_annotation_stage()
-        self.run_diarization_stage()
-        self.run_speaker_segmentation_stage()
-        self.run_resample_segments_stage()
-        self.run_transcription_stage(asr_engine=self.asr_engine)
-        self.run_rename_soundbites_stage()
-        self.run_final_soundbite_stage()
-        self.run_llm_stage(llm_config_path=self.llm_config_path)
-        self.run_remix_stage()
-        self.run_show_stage()
-        self.run_finalization_stage()
+        # Find the original input audio file (should be in renamed/)
+        renamed_dir = self.run_folder / 'renamed'
+        input_files = [f for f in renamed_dir.iterdir() if f.is_file()]
+        if not input_files:
+            print("[ERROR] No input files found in renamed/ directory.")
+            return
+        original_audio = input_files[0]
+        print(f"[DEBUG] Using original audio for CLAP: {original_audio}")
+        # Run CLAP segmentation on original audio
+        segmented_dir = self.run_folder / 'segmented'
+        segmented_dir.mkdir(parents=True, exist_ok=True)
+        from clap_annotation import segment_audio_with_clap
+        import json
+        segmentation_config_path = Path('workflows/clap_segmentation.json')
+        with open(segmentation_config_path, 'r', encoding='utf-8') as f:
+            segmentation_config = json.load(f)["clap_segmentation"]
+        segments = segment_audio_with_clap(
+            original_audio,
+            segmentation_config,
+            segmented_dir,
+            model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
+            chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
+            overlap_sec=segmentation_config.get("overlap_sec", 2)
+        )
+        # If segments found, process each segment; else, process the whole file
+        files_to_process = []
+        if segments:
+            print(f"[DEBUG] CLAP segmentation found {len(segments)} segments.")
+            for seg in segments:
+                files_to_process.append(Path(seg["output_path"]))
+        else:
+            print("[DEBUG] No CLAP segments found; processing whole file.")
+            files_to_process = [original_audio]
+        # For each file (segment or whole), perform separation and downstream steps
+        for idx, audio_file in enumerate(files_to_process):
+            print(f"[DEBUG] Processing segment {idx}: {audio_file}")
+            # Place segment in a per-segment input folder for separation
+            seg_input_dir = self.run_folder / 'segment_inputs' / f'segment_{idx:04d}'
+            seg_input_dir.mkdir(parents=True, exist_ok=True)
+            seg_audio_path = seg_input_dir / audio_file.name
+            import shutil
+            shutil.copy2(audio_file, seg_audio_path)
+            # Ingest segment as a job
+            job = Job(job_id=f'segment_{idx:04d}', data={
+                'orig_path': str(seg_audio_path),
+                'base_name': seg_audio_path.name,
+                'is_tuple': False,
+                'tuple_index': idx,
+                'subid': 'c',
+                'file_type': 'out',
+                'timestamp': '',
+                'ext': seg_audio_path.suffix
+            })
+            self.jobs = [job]  # Overwrite jobs for this segment
+            self.add_separation_jobs()
+            self.run_audio_separation_stage()
+            self.run_normalization_stage()
+            self.run_true_peak_normalization_stage()
+            # Use separated vocals for downstream steps
+            separated_dir = self.run_folder / 'separated' / f'{idx:04d}'
+            vocal_path = separated_dir / 'out-vocals.wav'
+            if not vocal_path.exists():
+                wavs = list(separated_dir.glob('*.wav'))
+                if not wavs:
+                    print(f"[ERROR] No separated vocals found for segment {idx}.")
+                    continue
+                vocal_path = wavs[0]
+            # Run CLAP annotation on the separated vocal (for context, not segmentation)
+            from clap_annotation import annotate_clap_for_out_files
+            clap_dir = self.run_folder / 'clap' / f'{idx:04d}'
+            annotate_clap_for_out_files(
+                input_dir=Path(vocal_path).parent,
+                output_dir=clap_dir,
+                prompts=segmentation_config.get("prompts", []),
+                model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
+                chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
+                overlap_sec=segmentation_config.get("overlap_sec", 2),
+                confidence_threshold=segmentation_config.get("confidence_threshold", 0.6)
+            )
+            # Downstream steps
+            self.run_diarization_stage()
+            self.run_speaker_segmentation_stage()
+            self.run_resample_segments_stage()
+            self.run_transcription_stage(asr_engine=self.asr_engine)
+            self.run_rename_soundbites_stage()
+            self.run_final_soundbite_stage()
+            self.run_llm_stage(llm_config_path=self.llm_config_path)
+            self.run_remix_stage()
+            self.run_show_stage()
+            self.run_finalization_stage()
 
     def run_call_processing_workflow(self):
         # Full pipeline for call-processing mode

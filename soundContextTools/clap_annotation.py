@@ -60,6 +60,11 @@ def run_clap_annotation_on_chunk(chunk_waveform, sr, prompts, model, processor, 
 def run_clap_annotation(audio_path: Path, prompts: List[str], model_id: str = "laion/clap-htsat-unfused", chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.5) -> List[Dict]:
     processor = ClapProcessor.from_pretrained(model_id)
     model = ClapModel.from_pretrained(model_id)
+    # Move model to GPU if available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    logging.info(f"[CLAP] Model loaded: {model_id} on device: {device}")
+    model.eval()
     try:
         waveform, sr = torchaudio.load(str(audio_path))
         if waveform.numel() == 0:
@@ -84,86 +89,120 @@ def run_clap_annotation(audio_path: Path, prompts: List[str], model_id: str = "l
             })
     return all_results
 
-def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List[str] = None, model=None, chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.6) -> List[Dict]:
+def annotate_clap_for_out_files(
+    input_dir: Path,
+    output_dir: Path,
+    prompts: list = None,
+    model_id: str = "laion/clap-htsat-unfused",
+    chunk_length_sec=5,
+    overlap_sec=2,
+    confidence_threshold=0.6
+) -> list:
     """
-    Annotate all 'out' files in renamed_dir using CLAP and save results in clap_dir.
-    Uses the specified CLAP model (default: fused model).
-    Skips and logs any files that are empty or unreadable.
-    Logs all CLAP events with confidence >= 0.6 to a clap.json per channel/file.
-    Only events with confidence >= 0.9 should be included in the master transcript.
+    Annotate all files in input_dir using CLAP and save results in output_dir.
+    Uses the specified CLAP model.
+    Logs all CLAP events with confidence >= threshold to a .json per file.
+    Returns a list of result dicts for manifest.
     """
-    if model is None:
-        model = 'laion/clap-htsat-fused'  # Default to fused model
-    # Default prompts if not provided
-    if prompts is None:
-        prompts = [
-            'dog barking', 'DTMF', 'ringing', 'yelling', 'music', 'laughter', 'crying', 'doorbell', 'car horn', 'applause', 'gunshot',
-            'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence',
-            'telephone ring tones', 'telephone hang-up tones'
-        ]
-    if not renamed_dir.exists():
-        print(f"⚠️  Renamed directory does not exist: {renamed_dir}")
-        return []
-    out_files = [f for f in renamed_dir.iterdir() if f.is_file() and '-out-' in f.name]
-    if not out_files:
-        print(f"⚠️  No 'out' files found in renamed directory: {renamed_dir}")
-        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    for file in renamed_dir.iterdir():
-        if not file.is_file() or '-out-' not in file.name:
+    # Load model and processor
+    logging.info(f"[CLAP] Loading model: {model_id}")
+    processor = ClapProcessor.from_pretrained(model_id)
+    model = ClapModel.from_pretrained(model_id)
+    # Move model to GPU if available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    logging.info(f"[CLAP] Model loaded: {model_id} on device: {device}")
+    model.eval()
+    for audio_file in input_dir.glob('*'):
+        if not audio_file.is_file() or audio_file.suffix.lower() not in ['.wav', '.mp3', '.flac']:
             continue
-        call_id, channel, timestamp = parse_anonymized_filename(file.name)
-        if not call_id:
-            continue
-        out_dir = clap_dir / call_id
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"[ERROR] Failed to create directory {out_dir}: {e}")
-            continue
-        try:
-            print(f"[CLAP] Processing {file.name} ...")
-            annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
-            print(f"[CLAP] Detected {len(annotations)} events in {file.name}")
-            # Log all events with confidence >= 0.6
-            all_clap_events = [a for a in annotations if a.get('confidence', 0) >= 0.6]
-            clap_json_path = out_dir / f'{channel}_clap.json'
+        # Load audio to check sample rate
+        waveform, sr = torchaudio.load(str(audio_file))
+        duration = waveform.shape[-1] / sr
+        logging.info(f"[CLAP] Analyzing: {audio_file} | shape: {waveform.shape} | sr: {sr} | duration: {duration:.2f}s")
+        # Resample to 48000 Hz using ffmpeg if needed
+        target_sr = 48000
+        resampled_audio_path = output_dir / (audio_file.stem + '_clap_48k.wav')
+        if sr != target_sr:
+            import subprocess
+            ffmpeg_cmd = [
+                'ffmpeg', '-y', '-i', str(audio_file),
+                '-ar', str(target_sr),
+                '-ac', '1',  # mono for CLAP
+                str(resampled_audio_path)
+            ]
+            logging.info(f"[CLAP] Running ffmpeg for resample: {' '.join(ffmpeg_cmd)}")
+            result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                logging.error(f"[CLAP] ffmpeg resample failed for {audio_file.name}: {result.stderr.decode()}")
+                continue
+            logging.info(f"[CLAP] Saved ffmpeg-resampled audio to {resampled_audio_path}")
+        else:
+            # Save a copy as the resampled path for consistency
+            import shutil
+            shutil.copy2(audio_file, resampled_audio_path)
+            logging.info(f"[CLAP] Audio already at 48kHz, copied to {resampled_audio_path}")
+        # Load the resampled audio
+        waveform, sr = torchaudio.load(str(resampled_audio_path))
+        # Convert to mono if needed (should already be mono from ffmpeg)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        # Chunking (memory-efficient)
+        chunk_samples = int(chunk_length_sec * sr)
+        overlap_samples = int(overlap_sec * sr)
+        total_samples = waveform.shape[1]
+        start = 0
+        chunk_idx = 0
+        events = []
+        while start < total_samples:
+            end = min(start + chunk_samples, total_samples)
+            chunk = waveform[:, start:end]
+            chunk_duration = (end - start) / sr
+            if chunk.shape[1] < chunk_samples // 2:
+                start += chunk_samples - overlap_samples
+                continue
+            logging.info(f"[CLAP] Processing chunk {chunk_idx}: {start/sr:.2f}s - {end/sr:.2f}s ({chunk_duration:.2f}s)")
+            # Prepare input for CLAP
+            audio_np = chunk.squeeze().numpy()
             try:
-                with open(clap_json_path, 'w', encoding='utf-8') as f:
-                    json.dump(all_clap_events, f, indent=2)
-                print(f"[CLAP] Wrote {clap_json_path}")
+                inputs = processor(audios=audio_np, return_tensors="pt", sampling_rate=sr, padding=True)
+                # Move all tensors to the same device as the model
+                inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+                for prompt in prompts or []:
+                    with torch.no_grad():
+                        text_inputs = processor(text=prompt, return_tensors="pt", padding=True)
+                        text_inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in text_inputs.items()}
+                        outputs = model(**inputs, **text_inputs)
+                        logits = outputs.logits_per_audio
+                        conf = logits.item() if hasattr(logits, 'item') else float(logits)
+                        if conf >= confidence_threshold:
+                            event = {
+                                'file': str(audio_file),
+                                'prompt': prompt,
+                                'confidence': conf,
+                                'start_time': start / sr,
+                                'end_time': end / sr
+                            }
+                            events.append(event)
             except Exception as e:
-                print(f"[ERROR] Failed to write {clap_json_path}: {e}")
-            # Only keep events with confidence >= 0.9 for master transcript
-            high_conf_events = [a for a in annotations if a.get('confidence', 0) >= 0.9]
-            ann_path = out_dir / 'clap_annotations.json'
-            try:
-                with open(ann_path, 'w', encoding='utf-8') as f:
-                    json.dump(high_conf_events, f, indent=2)
-                print(f"[CLAP] Wrote {ann_path}")
-            except Exception as e:
-                print(f"[ERROR] Failed to write {ann_path}: {e}")
-            results.append({
-                'call_id': call_id,
-                'input_name': file.name,
-                'annotation_path': str(ann_path),
-                'clap_json_path': str(clap_json_path),
-                'accepted_annotations': high_conf_events,
-                'all_clap_events': all_clap_events
-            })
-        except Exception as e:
-            # Log privacy-preserving error, skip file
-            error_msg = f"CLAP annotation failed for {file.name}: {str(e)}"
-            print(f"[WARN] {error_msg}")
-            results.append({
-                'call_id': call_id,
-                'input_name': file.name,
-                'annotation_path': None,
-                'clap_json_path': None,
-                'accepted_annotations': [],
-                'all_clap_events': [],
-                'error': error_msg
-            })
+                logging.error(f"[CLAP] Error processing chunk {chunk_idx}: {e}")
+            start += chunk_samples - overlap_samples
+            chunk_idx += 1
+        logging.info(f"[CLAP] Processed {chunk_idx} chunks for {audio_file.name}")
+        # Write results
+        out_json = output_dir / (audio_file.stem + '_clap_annotations.json')
+        with open(out_json, 'w', encoding='utf-8') as f:
+            json.dump(events, f, indent=2)
+        logging.info(f"[CLAP] {audio_file.name}: {len(events)} events detected, written to {out_json}")
+        results.append({
+            'input_name': audio_file.name,
+            'annotation_path': str(out_json),
+            'resampled_audio_path': str(resampled_audio_path),
+            'accepted_annotations': events,
+            'call_id': audio_file.stem
+        })
     return results
 
 def pair_clap_events(events, config, total_duration):
