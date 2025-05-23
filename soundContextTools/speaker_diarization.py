@@ -88,7 +88,7 @@ def batch_diarize(
     progress: bool = True,
 ) -> List[Dict]:
     """
-    Batch process all *-vocals.wav files in separated/<call id>/ and output to diarized/<call id>/.
+    Batch process all *-vocals.wav files and *-conversation.wav files in separated/<call id>/ and output to diarized/<call id>/.
     Returns a list of output metadata dicts.
     """
     results = []
@@ -98,12 +98,18 @@ def batch_diarize(
             continue
         diarized_dir = os.path.join(diarized_root, call_id)
         Path(diarized_dir).mkdir(parents=True, exist_ok=True)
-        vocals = [
-            f for f in os.listdir(call_dir)
-            if f.endswith("-vocals.wav")
-        ]
-        for vf in tqdm(vocals, desc=f"Diarizing {call_id}", disable=not progress):
-            input_wav = os.path.join(call_dir, vf)
+        
+        # Find both traditional vocal files and conversation files
+        audio_files = []
+        # Traditional pattern: *-vocals.wav (from separation)
+        vocals = [f for f in os.listdir(call_dir) if f.endswith("-vocals.wav")]
+        audio_files.extend(vocals)
+        # Single file pattern: *-conversation.wav (from single file processing)
+        conversations = [f for f in os.listdir(call_dir) if f.endswith("-conversation.wav")]
+        audio_files.extend(conversations)
+        
+        for audio_file in tqdm(audio_files, desc=f"Diarizing {call_id}", disable=not progress):
+            input_wav = os.path.join(call_dir, audio_file)
             try:
                 out = diarize_file(
                     input_wav,
@@ -113,11 +119,11 @@ def batch_diarize(
                     max_speakers=max_speakers,
                 )
                 out["call_id"] = call_id
-                out["input_name"] = vf
+                out["input_name"] = audio_file
                 results.append(out)
             except Exception as e:
                 # No PII in error logs
-                print(f"[WARN] Diarization failed for {call_id}/{vf}: {e}")
+                print(f"[WARN] Diarization failed for {call_id}/{audio_file}: {e}")
     return results
 
 

@@ -18,6 +18,8 @@ import soundfile as sf
 from collections import defaultdict
 # --- Finalization stage import ---
 from finalization_stage import run_finalization_stage
+# --- Resume functionality imports ---
+from resume_utils import add_resume_to_orchestrator, run_stage_with_resume, should_resume_pipeline, print_resume_status, print_stage_status
 
 rich_traceback_install()
 console = Console()
@@ -40,7 +42,7 @@ class Job:
         self.job_type = job_type  # 'rename' or 'separate'
 
 class PipelineOrchestrator:
-    def __init__(self, run_folder: Path):
+    def __init__(self, run_folder: Path, asr_engine: str, llm_config_path: str = None):
         self.jobs: List[Job] = []
         self.log: List[Dict[str, Any]] = []
         self.manifest: List[Dict[str, Any]] = []
@@ -48,6 +50,8 @@ class PipelineOrchestrator:
         self._log_buffer: List[Dict[str, Any]] = []  # Buffer for log events
         self._console_buffer: List[str] = []         # Buffer for console output
         self._logging_enabled = False                # Only enable after PII is gone
+        self.asr_engine = asr_engine
+        self.llm_config_path = llm_config_path
     def add_job(self, job: Job):
         self.jobs.append(job)
     def log_event(self, level, event, details=None):
@@ -80,6 +84,8 @@ class PipelineOrchestrator:
             console.print(msg)
         self._console_buffer.clear()
     def write_log(self):
+        # Ensure run_folder exists before writing
+        self.run_folder.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d-%H%M%S')
         log_path = self.run_folder / f'orchestrator-log-{ts}.json'
         with open(log_path, 'w', encoding='utf-8') as f:
@@ -89,6 +95,8 @@ class PipelineOrchestrator:
         else:
             self._console_buffer.append(f"[bold green]Orchestrator log written to {log_path}[/]")
     def write_manifest(self):
+        # Ensure run_folder exists before writing  
+        self.run_folder.mkdir(parents=True, exist_ok=True)
         manifest_path = self.run_folder / 'manifest.json'
         with open(manifest_path, 'w', encoding='utf-8') as f:
             json.dump(self.manifest, f, indent=2)
@@ -99,8 +107,31 @@ class PipelineOrchestrator:
     def add_separation_jobs(self):
         """
         After renaming, create jobs for audio separation for each left/right file in renamed/.
+        Single files (like 'out' files) skip separation and are copied directly for diarization.
         """
         renamed_dir = self.run_folder / 'renamed'
+        
+        # Check if renamed directory exists
+        if not renamed_dir.exists():
+            self.log_event('WARNING', 'renamed_directory_missing', {
+                'renamed_dir': str(renamed_dir),
+                'message': 'No renamed directory found, skipping separation job creation'
+            })
+            return
+        
+        # Check if directory is empty
+        renamed_files = list(renamed_dir.glob('*'))
+        if not renamed_files:
+            self.log_event('WARNING', 'renamed_directory_empty', {
+                'renamed_dir': str(renamed_dir),
+                'message': 'Renamed directory is empty, no separation jobs to create'
+            })
+            return
+        
+        separation_job_count = 0
+        single_file_count = 0
+        
+        # Handle traditional left/right files that need separation
         for file in renamed_dir.iterdir():
             if file.is_file() and ('-left-' in file.name or '-right-' in file.name):
                 job_data = {
@@ -109,6 +140,48 @@ class PipelineOrchestrator:
                 }
                 job_id = f"separate_{file.stem}"
                 self.jobs.append(Job(job_id=job_id, data=job_data, job_type='separate'))
+                separation_job_count += 1
+        
+        # Handle single files (complete conversations) - skip separation, prepare for diarization
+        for file in renamed_dir.iterdir():
+            if file.is_file() and not ('-left-' in file.name or '-right-' in file.name):
+                # This is a complete conversation file - skip separation
+                single_file_count += 1
+                
+                # Extract call_id from filename (the index part)
+                call_id = file.stem.split('-')[0]  # e.g., "0000" from "0000-out-20241227-001220"
+                
+                # Create separated directory structure (even though we're not separating)
+                separated_dir = self.run_folder / 'separated' / call_id
+                separated_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy as complete conversation file for diarization
+                conversation_file = separated_dir / f"{call_id}-conversation.wav"
+                
+                # Convert to WAV if needed and copy
+                import soundfile as sf
+                try:
+                    # Read and convert to WAV
+                    audio, sr = sf.read(str(file))
+                    sf.write(str(conversation_file), audio, sr)
+                    
+                    self.log_event('INFO', 'single_file_ready_for_diarization', {
+                        'input_file': str(file),
+                        'output_file': str(conversation_file),
+                        'call_id': call_id,
+                        'message': 'Complete conversation file, skipped separation'
+                    })
+                except Exception as e:
+                    self.log_event('ERROR', 'single_file_preparation_failed', {
+                        'input_file': str(file),
+                        'error': str(e)
+                    })
+        
+        self.log_event('INFO', 'separation_jobs_created', {
+            'separation_job_count': separation_job_count,
+            'single_file_count': single_file_count,
+            'total_files': len(renamed_files)
+        })
 
     def run_audio_separation_stage(self):
         """
@@ -190,7 +263,8 @@ class PipelineOrchestrator:
 
     def run_diarization_stage(self, hf_token=None, min_speakers=None):
         """
-        Run speaker diarization for all *-vocals.wav files in separated/<call id>/.
+        Run speaker diarization for all vocal files in separated/<call id>/.
+        Handles both traditional *-vocals.wav files and complete *-conversation.wav files.
         Sets max_speakers=8 for all files (model limit).
         Updates manifest and logs via orchestrator methods.
         Logs every file written and updates manifest.
@@ -199,6 +273,25 @@ class PipelineOrchestrator:
         diarized_dir = self.run_folder / 'diarized'
         diarized_dir.mkdir(exist_ok=True)
         self.log_event('INFO', 'diarization_start', {'max_speakers': 8})
+        
+        # Find all files to diarize (vocals from separation + complete conversations)
+        audio_files = []
+        for call_dir in separated_dir.iterdir():
+            if not call_dir.is_dir():
+                continue
+            # Traditional pattern: left-vocals.wav, right-vocals.wav
+            for vocals_file in call_dir.glob('*-vocals.wav'):
+                audio_files.append(vocals_file)
+            # Complete conversation pattern: *-conversation.wav
+            for conv_file in call_dir.glob('*-conversation.wav'):
+                audio_files.append(conv_file)
+        
+        if not audio_files:
+            self.log_event('WARNING', 'no_audio_files_found', {
+                'separated_dir': str(separated_dir),
+                'message': 'No audio files found for diarization'
+            })
+        
         results = batch_diarize(
             str(separated_dir),
             str(diarized_dir),
@@ -969,7 +1062,11 @@ class PipelineOrchestrator:
                 result='success'
             )
         self.log_event('INFO', 'show_complete', {'show_wav': str(show_wav_path), 'show_json': str(show_json_path)})
-        # --- Finalization stage ---
+
+    def run_finalization_stage(self):
+        """
+        Run the finalization stage - converts to MP3, embeds ID3 tags, handles LLM output
+        """
         run_finalization_stage(self.run_folder, self.manifest)
 
     def run(self, call_tones=False):
@@ -1017,21 +1114,160 @@ class PipelineOrchestrator:
         self.run_llm_stage()
         self.run_remix_stage(call_tones=call_tones)
         self.run_show_stage(call_tones=call_tones)
+        self.run_finalization_stage()
 
-def create_jobs_from_input(input_dir: Path) -> List[Job]:
+    def _run_ingestion_jobs(self):
+        """Helper method for ingestion stage that can be used with resume functionality"""
+        
+        # Debug: Log job information
+        total_jobs = len(self.jobs)
+        rename_jobs = [job for job in self.jobs if job.job_type == 'rename']
+        
+        self.log_event('INFO', 'ingestion_start', {
+            'total_jobs': total_jobs,
+            'rename_jobs': len(rename_jobs),
+            'job_details': [{'job_id': j.job_id, 'job_type': j.job_type, 'orig_path': j.data.get('orig_path')} for j in self.jobs[:5]]  # First 5 jobs
+        })
+        
+        if total_jobs == 0:
+            self.log_event('WARNING', 'no_jobs_to_process', {'message': 'No ingestion jobs found'})
+            return
+        
+        with tqdm(total=len(self.jobs), desc="Ingestion Progress", position=0) as global_bar:
+            processed_files = 0
+            for job in self.jobs:
+                if job.job_type == 'rename':
+                    result = process_file_job(job, self.run_folder)
+                    
+                    # Debug: Log each file processing result
+                    self.log_event('INFO', 'file_processing_result', {
+                        'job_id': job.job_id,
+                        'success': result.get('success', False),
+                        'output_name': result.get('output_name'),
+                        'output_path': result.get('output_path'),
+                        'error': result.get('error')
+                    })
+                    
+                    manifest_entry = {
+                        'job_id': job.job_id,
+                        'tuple_index': job.data.get('tuple_index'),
+                        'subid': job.data.get('subid'),
+                        'type': job.data.get('file_type'),
+                        'timestamp': job.data.get('timestamp'),
+                        'output_name': result.get('output_name'),
+                        'output_path': result.get('output_path'),
+                        'stage': 'renamed',
+                    }
+                    if result['success']:
+                        self.log_event('INFO', 'file_renamed', {
+                            'output_name': result.get('output_name'),
+                            'output_path': result.get('output_path')
+                        })
+                        self.manifest.append(manifest_entry)
+                        processed_files += 1
+                    else:
+                        self.log_event('ERROR', 'file_rename_failed', {
+                            'output_name': result.get('output_name'),
+                            'output_path': result.get('output_path'),
+                            'error': result.get('error')
+                        })
+                        self.manifest.append(manifest_entry)
+                    global_bar.update(1)
+        
+        self.log_event('INFO', 'ingestion_complete', {
+            'total_jobs': total_jobs,
+            'processed_files': processed_files,
+            'renamed_dir': str(self.run_folder / 'renamed')
+        })
+        
+        self.enable_logging()
+        self.write_log()
+        self.write_manifest()
+
+    def run_with_resume(self, call_tones=False, resume=True, resume_from=None):
+        """Enhanced pipeline run method with resume functionality"""
+        # Add resume functionality to orchestrator
+        add_resume_to_orchestrator(self, resume_mode=True)
+        
+        # Print resume summary at start
+        print_resume_status(self.run_folder, detailed=True)
+        
+        # Define all stages with their methods
+        stages_and_methods = [
+            ('ingestion', self._run_ingestion_jobs),
+            ('separation', lambda: (self.add_separation_jobs(), self.run_audio_separation_stage())),
+            ('normalization', self.run_normalization_stage),
+            ('clap', self.run_clap_annotation_stage),
+            ('diarization', self.run_diarization_stage),
+            ('segmentation', self.run_speaker_segmentation_stage),
+            ('resampling', self.run_resample_segments_stage),
+            ('transcription', lambda: self.run_transcription_stage(asr_engine='parakeet')),
+            ('soundbite_renaming', self.run_rename_soundbites_stage),
+            ('soundbite_finalization', self.run_final_soundbite_stage),
+            ('llm', self.run_llm_stage),
+            ('remix', lambda: self.run_remix_stage(call_tones=call_tones)),
+            ('show', lambda: self.run_show_stage(call_tones=call_tones))
+        ]
+        
+        # Run each stage with resume support
+        for stage_name, stage_method in stages_and_methods:
+            try:
+                run_stage_with_resume(self, stage_name, stage_method, resume_from)
+            except Exception as e:
+                self.log_event('ERROR', f'pipeline_failed_at_stage', {
+                    'stage': stage_name,
+                    'error': str(e)
+                })
+                console.print(f"\n[bold red]Pipeline failed at stage: {stage_name}[/]")
+                console.print(f"[red]Error: {e}[/]")
+                console.print(f"\n[yellow]To resume from this point, run with --resume[/]")
+                raise
+        
+        # Final summary
+        console.print("\n[bold green]🎉 Pipeline completed successfully![/]")
+        print_resume_status(self.run_folder, detailed=True)
+
+def create_jobs_from_input(input_path: Path) -> List[Job]:
+    """Create jobs from input path (can be a single file or directory)"""
     all_files = []
     seen_names = set()
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            ext = Path(file).suffix.lower()
-            if ext not in SUPPORTED_EXTENSIONS:
-                continue
-            orig_path = Path(root) / file
-            base_name = Path(file).name
-            if base_name in seen_names:
-                base_name = f"{Path(file).stem}_{uuid.uuid4().hex[:6]}{Path(file).suffix}"
-            seen_names.add(base_name)
+    
+    # Handle both single files and directories
+    if input_path.is_file():
+        # Single file input
+        file = input_path.name
+        ext = input_path.suffix.lower()
+        if ext in SUPPORTED_EXTENSIONS:
+            orig_path = input_path
+            base_name = file
             all_files.append((orig_path, base_name))
+    elif input_path.is_dir():
+        # Directory input - original logic
+        for root, _, files in os.walk(input_path):
+            for file in files:
+                ext = Path(file).suffix.lower()
+                if ext not in SUPPORTED_EXTENSIONS:
+                    continue
+                orig_path = Path(root) / file
+                base_name = Path(file).name
+                if base_name in seen_names:
+                    base_name = f"{Path(file).stem}_{uuid.uuid4().hex[:6]}{Path(file).suffix}"
+                seen_names.add(base_name)
+                all_files.append((orig_path, base_name))
+    else:
+        # Input path doesn't exist or is neither file nor directory
+        print(f"❌ Input path does not exist or is invalid: {input_path}")
+        return []
+    
+    if not all_files:
+        print(f"❌ No supported audio files found in: {input_path}")
+        print(f"Supported extensions: {SUPPORTED_EXTENSIONS}")
+        return []
+    
+    print(f"📁 Found {len(all_files)} supported audio file(s) to process")
+    for orig_path, base_name in all_files:
+        print(f"   📄 {base_name} ({orig_path})")
+    
     # Group files into tuples by timestamp
     tuple_groups = {}
     singles = []
@@ -1046,7 +1282,14 @@ def create_jobs_from_input(input_dir: Path) -> List[Job]:
                 tuple_groups[tuple_key] = []
             tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
         else:
-            singles.append((orig_path, base_name, ts_str, ext))
+            # Treat single audio files as 'out' files for full pipeline processing
+            print(f"   🔄 Treating single file as 'out' file for full pipeline processing")
+            file_type = 'out'  # Force single files to be processed as 'out' files
+            tuple_key = ts_str
+            if tuple_key not in tuple_groups:
+                tuple_groups[tuple_key] = []
+            tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
+    
     jobs = []
     # Add tuple jobs (shared index, unique subid)
     for idx, (ts_str, files) in enumerate(sorted(tuple_groups.items())):
@@ -1066,19 +1309,9 @@ def create_jobs_from_input(input_dir: Path) -> List[Job]:
                 'ext': ext
             }
             jobs.append(Job(job_id=f"tuple_{idx}_{subid}_{file_type}", data=job_data))
-    # Add single jobs
-    for idx, (orig_path, base_name, ts_str, ext) in enumerate(singles):
-        job_data = {
-            'orig_path': str(orig_path),
-            'base_name': base_name,
-            'is_tuple': False,
-            'tuple_index': idx,
-            'subid': None,
-            'file_type': 'single',
-            'timestamp': ts_str,
-            'ext': ext
-        }
-        jobs.append(Job(job_id=f"single_{idx}", data=job_data))
+    
+    # Note: No separate single jobs now - all files are processed as tuples
+    print(f"🔧 Created {len(jobs)} job(s): {len(tuple_groups)} tuple groups (including single files treated as 'out' files)")
     return jobs
 
 def extract_type(filename):
@@ -1108,20 +1341,79 @@ if __name__ == '__main__':
     parser.add_argument('--asr_engine', type=str, choices=['parakeet', 'whisper'], default='parakeet', help='ASR engine to use for transcription (default: parakeet)')
     parser.add_argument('--llm_config', type=str, default=None, help='Path to LLM task config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to end of each call and between calls in show file')
+    # Resume functionality arguments
+    parser.add_argument('--resume', action='store_true', help='Enable resume functionality - skip completed stages')
+    parser.add_argument('--resume-from', type=str, metavar='STAGE', help='Resume from a specific stage (skip all prior completed stages)')
+    parser.add_argument('--force-rerun', type=str, metavar='STAGE', help='Force re-run a specific stage even if marked complete')
+    parser.add_argument('--clear-from', type=str, metavar='STAGE', help='Clear completion status from specified stage onwards')
+    parser.add_argument('--stage-status', type=str, metavar='STAGE', help='Show detailed status for a specific stage')
+    parser.add_argument('--show-resume-status', action='store_true', help='Show current resume status and exit')
+    
     args = parser.parse_args()
+    
+    # Handle status-only commands first
+    if args.show_resume_status:
+        from resume_utils import print_resume_status
+        run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        # Try to find most recent run folder
+        if Path("outputs").exists():
+            run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
+            if run_folders:
+                run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
+        print_resume_status(run_folder, detailed=True)
+        exit(0)
+    
+    if args.stage_status:
+        from resume_utils import print_stage_status
+        run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        # Try to find most recent run folder
+        if Path("outputs").exists():
+            run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
+            if run_folders:
+                run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
+        print_stage_status(run_folder, args.stage_status)
+        exit(0)
+    
+    # Initialize orchestrator
     input_dir = Path(args.input_dir)
     run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-    run_folder = Path('output') / run_ts
-    run_folder.mkdir(parents=True, exist_ok=True)
-    orchestrator = PipelineOrchestrator(run_folder)
+    run_folder = Path('outputs') / f'run-{run_ts}'
+    
+    # Create orchestrator with proper parameters
+    orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+    
+    # Create jobs from input directory
     jobs = create_jobs_from_input(input_dir)
-    # Use patched process_file_job for new filename format
-    global process_file_job
-    process_file_job = process_file_job_with_subid
     for job in jobs:
         orchestrator.add_job(job)
-    # Run full pipeline (transcription and renaming included)
-    orchestrator.run(call_tones=args.call_tones)
-    # Run LLM stage after all other stages
-    orchestrator.run_llm_stage(llm_config_path=args.llm_config)
+    
+    # Handle clear-from command
+    if args.clear_from:
+        from resume_utils import ResumeHelper
+        helper = ResumeHelper(orchestrator.run_folder)
+        helper.clear_from_stage(args.clear_from)
+        print(f"✅ Cleared completion status from '{args.clear_from}' onwards")
+        exit(0)
+    
+    # Handle force-rerun command
+    if args.force_rerun:
+        from resume_utils import ResumeHelper
+        helper = ResumeHelper(orchestrator.run_folder)
+        helper.force_rerun_stage(args.force_rerun)
+        print(f"✅ Forced stage '{args.force_rerun}' to be re-run")
+        # Continue with normal run
+    
+    # Determine resume mode
+    resume_mode = args.resume or args.resume_from or args.force_rerun
+    resume_from_stage = args.resume_from
+    
+    # Run the pipeline
+    if resume_mode:
+        orchestrator.run_with_resume(call_tones=args.call_tones, resume=True, resume_from=resume_from_stage)
+    else:
+        orchestrator.run(call_tones=args.call_tones)
+    
+    # Run LLM stage after all other stages (if not using resume, or if resume doesn't handle it)
+    if not resume_mode:
+        orchestrator.run_llm_stage(llm_config_path=args.llm_config)
     # No redundant transcription after renaming 

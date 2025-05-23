@@ -88,6 +88,18 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
             'dog barking', 'DTMF', 'ringing', 'yelling', 'music', 'laughter', 'crying', 'doorbell', 'car horn', 'applause', 'gunshot',
             'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence'
         ]
+    
+    # Check if renamed directory exists
+    if not renamed_dir.exists():
+        print(f"⚠️  Renamed directory does not exist: {renamed_dir}")
+        return []
+    
+    # Check if directory has any 'out' files
+    out_files = [f for f in renamed_dir.iterdir() if f.is_file() and '-out-' in f.name]
+    if not out_files:
+        print(f"⚠️  No 'out' files found in renamed directory: {renamed_dir}")
+        return []
+    
     results = []
     for file in renamed_dir.iterdir():
         if not file.is_file() or '-out-' not in file.name:
