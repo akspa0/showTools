@@ -9,6 +9,7 @@ import re
 import numpy as np
 import soundfile as sf
 from shutil import copyfile
+import logging
 
 def parse_anonymized_filename(filename):
     # Example: 0000-out-20250511-221253.wav
@@ -115,19 +116,33 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
         if not call_id:
             continue
         out_dir = clap_dir / call_id
-        out_dir.mkdir(parents=True, exist_ok=True)
         try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to create directory {out_dir}: {e}")
+            continue
+        try:
+            print(f"[CLAP] Processing {file.name} ...")
             annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
+            print(f"[CLAP] Detected {len(annotations)} events in {file.name}")
             # Log all events with confidence >= 0.6
             all_clap_events = [a for a in annotations if a.get('confidence', 0) >= 0.6]
             clap_json_path = out_dir / f'{channel}_clap.json'
-            with open(clap_json_path, 'w', encoding='utf-8') as f:
-                json.dump(all_clap_events, f, indent=2)
+            try:
+                with open(clap_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(all_clap_events, f, indent=2)
+                print(f"[CLAP] Wrote {clap_json_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to write {clap_json_path}: {e}")
             # Only keep events with confidence >= 0.9 for master transcript
             high_conf_events = [a for a in annotations if a.get('confidence', 0) >= 0.9]
             ann_path = out_dir / 'clap_annotations.json'
-            with open(ann_path, 'w', encoding='utf-8') as f:
-                json.dump(high_conf_events, f, indent=2)
+            try:
+                with open(ann_path, 'w', encoding='utf-8') as f:
+                    json.dump(high_conf_events, f, indent=2)
+                print(f"[CLAP] Wrote {ann_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to write {ann_path}: {e}")
             results.append({
                 'call_id': call_id,
                 'input_name': file.name,

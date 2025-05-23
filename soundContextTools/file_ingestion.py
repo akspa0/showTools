@@ -8,6 +8,8 @@ import uuid
 from rich.console import Console
 from rich.traceback import install as rich_traceback_install
 import argparse
+import re
+import unicodedata
 
 # Install rich traceback for better error output
 rich_traceback_install()
@@ -213,6 +215,16 @@ def redact_pii(details, is_tuple):
         redacted[k] = v
     return redacted
 
+def sanitize_filename_for_id3(name):
+    # Remove emoji and non-printable characters
+    def is_emoji(c):
+        return c in (c for c in name if unicodedata.category(c) in ['So', 'Sk', 'Cs'])
+    name = ''.join(c for c in name if not is_emoji(c) and c.isprintable())
+    # Remove problematic filesystem characters
+    name = re.sub(r'[\\/:*?"<>|]', '', name)
+    # Optionally, limit length
+    return name[:128]
+
 def process_file_job(job, run_folder: Path):
     """
     Process a single file/tuple as a job: copy to raw_inputs, rename if needed, and return result dict.
@@ -226,6 +238,14 @@ def process_file_job(job, run_folder: Path):
     orig_path = Path(job.data['orig_path'])
     base_name = job.data['base_name']
     ext = job.data['ext']
+    # Before renaming, extract and sanitize original name/title
+    orig_name = job.data.get('base_name')
+    yt_title = job.data.get('yt_title')
+    if yt_title:
+        orig_name = sanitize_filename_for_id3(yt_title)
+    else:
+        orig_name = sanitize_filename_for_id3(orig_name)
+    job.data['original_title_for_id3'] = orig_name
     # Copy to raw_inputs (flat), but do NOT log anything
     dest_raw = raw_inputs_dir / base_name
     try:

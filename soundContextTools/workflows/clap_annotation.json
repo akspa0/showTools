@@ -5,7 +5,7 @@
     "footsteps", "phone hangup", "phone pickup", "busy signal", "static",
     "noise", "silence", "telephone ring tones", "hang-up tones"
   ],
-  "confidence_threshold": 0.6,
-  "chunk_length_sec": 5,
-  "overlap_sec": 2
+  "confidence_threshold": 0.4,
+  "chunk_length_sec": 8,
+  "overlap_sec": 3
 } 

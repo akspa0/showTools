@@ -24,6 +24,8 @@ from resume_utils import add_resume_to_orchestrator, run_stage_with_resume, shou
 import random
 import hashlib
 import yaml
+import tempfile
+import shutil
 
 rich_traceback_install()
 console = Console()
@@ -875,32 +877,68 @@ class PipelineOrchestrator:
         llm_tasks = llm_config.get('llm_tasks', [])
         soundbites_dir = self.run_folder / 'soundbites'
         llm_dir = self.run_folder / 'llm'
-        llm_dir.mkdir(exist_ok=True)
+        llm_dir.mkdir(exist_ok=True, parents=True)
         call_ids = [d.name for d in soundbites_dir.iterdir() if d.is_dir()]
         self.log_event('INFO', 'llm_stage_start', {'llm_dir': str(llm_dir)})
+        max_tokens = 16384
+        safe_chunk = 10000  # chunk size for LLM input
         for call_id in call_ids:
             master_transcript = self.get_master_transcript_path(call_id)
             transcript_text = None
             if master_transcript.exists():
                 with open(master_transcript, 'r', encoding='utf-8') as f:
                     transcript_text = f.read()
-            # If transcript is too long, chunk by speaker
-            if transcript_text and len(transcript_text.split()) > 15000:
-                # Use per-speaker chunking
-                per_speaker = self.get_per_speaker_transcripts(call_id)
-                call_llm_dir = llm_dir / call_id
-                call_llm_dir.mkdir(parents=True, exist_ok=True)
-                speaker_outputs = {}
-                for speaker_id, speaker_text in per_speaker.items():
-                    speaker_outputs[speaker_id] = {}
+            per_speaker = self.get_per_speaker_transcripts(call_id)
+            call_llm_dir = llm_dir / call_id
+            call_llm_dir.mkdir(parents=True, exist_ok=True)
+            speaker_outputs = {}
+            for speaker_id, speaker_text in per_speaker.items():
+                speaker_outputs[speaker_id] = {}
+                token_count = estimate_tokens(speaker_text)
+                if token_count > safe_chunk:
+                    # Chunk the transcript
+                    words = speaker_text.split()
+                    chunk_size = safe_chunk * 4  # fallback: 1 token ≈ 4 chars
+                    chunks = []
+                    current = []
+                    current_len = 0
+                    for word in words:
+                        current.append(word)
+                        current_len += len(word) + 1
+                        if current_len >= chunk_size:
+                            chunks.append(' '.join(current))
+                            current = []
+                            current_len = 0
+                    if current:
+                        chunks.append(' '.join(current))
+                    for i, chunk in enumerate(chunks):
+                        for task in llm_tasks:
+                            name = task.get('name', 'unnamed_task')
+                            prompt_template = task.get('prompt_template', '')
+                            output_file = f'{speaker_id}_chunk_{i+1:02d}_{name}.txt'
+                            prompt = f"[Part {i+1} of {len(chunks)} for Speaker {speaker_id}]\n" + prompt_template.format(transcript=chunk)
+                            output_path = call_llm_dir / output_file
+                            # For now, just write the prompt for demonstration
+                            with open(output_path, 'w', encoding='utf-8') as f:
+                                f.write(prompt)
+                            speaker_outputs[speaker_id][f'{name}_chunk_{i+1:02d}'] = str(output_path)
+                            self.log_and_manifest(
+                                stage='llm',
+                                call_id=call_id,
+                                input_files=[f'per-speaker:{speaker_id}'],
+                                output_files=[str(output_path)],
+                                params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id, 'chunk': i+1},
+                                metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
+                                event='llm_task',
+                                result='success'
+                            )
+                else:
                     for task in llm_tasks:
                         name = task.get('name', 'unnamed_task')
                         prompt_template = task.get('prompt_template', '')
                         output_file = f'{speaker_id}_{name}.txt'
                         prompt = prompt_template.format(transcript=speaker_text)
-                        # Use the same LLM API logic as before
                         output_path = call_llm_dir / output_file
-                        # ... (LLM API call logic, as in run_llm_task_for_call) ...
                         # For now, just write the prompt for demonstration
                         with open(output_path, 'w', encoding='utf-8') as f:
                             f.write(prompt)
@@ -915,47 +953,20 @@ class PipelineOrchestrator:
                             event='llm_task',
                             result='success'
                         )
-                # Aggregate per-speaker outputs into a summary file
-                agg_path = call_llm_dir / 'per_speaker_llm_outputs.json'
-                with open(agg_path, 'w', encoding='utf-8') as f:
-                    json.dump(speaker_outputs, f, indent=2)
-                self.log_and_manifest(
-                    stage='llm',
-                    call_id=call_id,
-                    input_files=None,
-                    output_files=[str(agg_path)],
-                    params={'aggregation': 'per-speaker'},
-                    metadata=None,
-                    event='llm_aggregation',
-                    result='success'
-                )
-            else:
-                # Use the original logic for short transcripts
-                call_llm_dir = llm_dir / call_id
-                call_llm_dir.mkdir(parents=True, exist_ok=True)
-                output_paths = self.run_llm_task_for_call(
-                    call_id=call_id,
-                    master_transcript=master_transcript,
-                    llm_config=llm_config,
-                    output_dir=call_llm_dir,
-                    llm_tasks=llm_tasks,
-                    global_llm_seed=self.global_llm_seed
-                )
-                for task in llm_tasks:
-                    name = task.get('name', 'unnamed_task')
-                    output_file = task.get('output_file', f'{name}.txt')
-                    output_path = call_llm_dir / output_file
-                    self.log_and_manifest(
-                        stage='llm',
-                        call_id=call_id,
-                        input_files=[str(master_transcript)],
-                        output_files=[str(output_path)],
-                        params={'task': name, 'prompt_template': task.get('prompt_template'), 'seed': output_paths.get('seed', None)},
-                        metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
-                        event='llm_task',
-                        result='success'
-                    )
-                self.log_event('INFO', 'llm_tasks_complete', {'call_id': call_id, 'llm_outputs': output_paths})
+            # Aggregate per-speaker outputs into a summary file
+            agg_path = call_llm_dir / 'per_speaker_llm_outputs.json'
+            with open(agg_path, 'w', encoding='utf-8') as f:
+                json.dump(speaker_outputs, f, indent=2)
+            self.log_and_manifest(
+                stage='llm',
+                call_id=call_id,
+                input_files=None,
+                output_files=[str(agg_path)],
+                params={'aggregation': 'per-speaker'},
+                metadata={'speaker_outputs': speaker_outputs},
+                event='llm_aggregation',
+                result='success'
+            )
 
     def run_normalization_stage(self):
         """
@@ -1280,68 +1291,56 @@ class PipelineOrchestrator:
         """
         run_finalization_stage(self.run_folder, self.manifest)
 
-    def run(self, call_tones=False, call_cutter=False):
-        with tqdm(total=len(self.jobs), desc="Global Progress", position=0) as global_bar:
-            for job in self.jobs:
-                if job.job_type == 'rename':
-                    result = process_file_job(job, self.run_folder)
-                    manifest_entry = {
-                        'job_id': job.job_id,
-                        'tuple_index': job.data.get('tuple_index'),
-                        'subid': job.data.get('subid'),
-                        'type': job.data.get('file_type'),
-                        'timestamp': job.data.get('timestamp'),
-                        'output_name': result.get('output_name'),
-                        'output_path': result.get('output_path'),
-                        'stage': 'renamed',
-                    }
-                    if result['success']:
-                        self.log_event('INFO', 'file_renamed', {
-                            'output_name': result.get('output_name'),
-                            'output_path': result.get('output_path')
-                        })
-                        self.manifest.append(manifest_entry)
-                    else:
-                        self.log_event('ERROR', 'file_rename_failed', {
-                            'output_name': result.get('output_name'),
-                            'output_path': result.get('output_path'),
-                            'error': result.get('error')
-                        })
-                        self.manifest.append(manifest_entry)
-                    global_bar.update(1)
-        self.enable_logging()
-        self.write_log()
-        self.write_manifest()
-        # --- CLAP segmentation if call_cutter is set ---
-        if call_cutter:
-            self.run_clap_segmentation_stage()
-            # Move all segment files into renamed/ for downstream processing
-            segmented_dir = self.run_folder / 'segmented'
-            renamed_dir = self.run_folder / 'renamed'
-            for call_id_dir in segmented_dir.iterdir():
-                if not call_id_dir.is_dir():
-                    continue
-                for seg_file in call_id_dir.glob('*.wav'):
-                    target = renamed_dir / seg_file.name
-                    if not target.exists():
-                        seg_file.replace(target)
+    def run(self, mode='auto', call_cutter=False):
+        print(f"[INFO] Running pipeline in {mode} mode.")
+        if mode == 'single-file':
+            # Run single-file workflow (CLAP segmentation, annotation, etc.)
+            self.run_single_file_workflow()
+        elif mode == 'calls':
+            # Run call-processing workflow
+            self.run_call_processing_workflow()
+        else:
+            # Fallback/auto
+            self.run_call_processing_workflow()
+
+    def run_single_file_workflow(self):
+        # Full pipeline for single-file mode
+        self._run_ingestion_jobs()
         self.add_separation_jobs()
         self.run_audio_separation_stage()
         self.run_normalization_stage()
         self.run_true_peak_normalization_stage()
-        self.run_clap_annotation_stage()  # Always run CLAP annotation on all files in renamed/
+        self.run_clap_segmentation_stage()
+        self.run_clap_annotation_stage()
         self.run_diarization_stage()
         self.run_speaker_segmentation_stage()
         self.run_resample_segments_stage()
-        self.run_transcription_stage(asr_engine='parakeet')
+        self.run_transcription_stage(asr_engine=self.asr_engine)
         self.run_rename_soundbites_stage()
         self.run_final_soundbite_stage()
-        self.run_llm_stage()
-        self.run_remix_stage(call_tones=call_tones)
-        self.run_show_stage(call_tones=call_tones)
+        self.run_llm_stage(llm_config_path=self.llm_config_path)
+        self.run_remix_stage()
+        self.run_show_stage()
         self.run_finalization_stage()
-        # Print a clear success message
-        print("\n\033[92m🎉🎉 Pipeline completed successfully! All outputs are ready. 🎉🎉\033[0m\n")
+
+    def run_call_processing_workflow(self):
+        # Full pipeline for call-processing mode
+        self._run_ingestion_jobs()
+        self.add_separation_jobs()
+        self.run_audio_separation_stage()
+        self.run_normalization_stage()
+        self.run_true_peak_normalization_stage()
+        self.run_clap_annotation_stage()
+        self.run_diarization_stage()
+        self.run_speaker_segmentation_stage()
+        self.run_resample_segments_stage()
+        self.run_transcription_stage(asr_engine=self.asr_engine)
+        self.run_rename_soundbites_stage()
+        self.run_final_soundbite_stage()
+        self.run_llm_stage(llm_config_path=self.llm_config_path)
+        self.run_remix_stage()
+        self.run_show_stage()
+        self.run_finalization_stage()
 
     def run_with_resume(self, call_tones=False, resume=True, resume_from=None):
         # Add resume functionality to orchestrator
@@ -1358,7 +1357,7 @@ class PipelineOrchestrator:
             ('diarization', self.run_diarization_stage),
             ('segmentation', self.run_speaker_segmentation_stage),
             ('resampling', self.run_resample_segments_stage),
-            ('transcription', lambda: self.run_transcription_stage(asr_engine='parakeet')),
+            ('transcription', lambda: self.run_transcription_stage(asr_engine=self.asr_engine)),
             ('soundbite_renaming', self.run_rename_soundbites_stage),
             ('soundbite_finalization', self.run_final_soundbite_stage),
             ('llm', self.run_llm_stage),
@@ -1561,103 +1560,6 @@ class PipelineOrchestrator:
                     transcripts[speaker_id] = '\n'.join(utterances)
         return transcripts
 
-    def run_llm_stage(self, llm_config_path=None):
-        import json
-        from pathlib import Path
-        if llm_config_path is None:
-            llm_config_path = Path('workflows/llm_tasks.json')
-        else:
-            llm_config_path = Path(llm_config_path)
-        if not llm_config_path.exists():
-            self.log_event('ERROR', 'llm_config_missing', {'path': str(llm_config_path)})
-            return
-        with open(llm_config_path, 'r', encoding='utf-8') as f:
-            llm_config = json.load(f)
-        llm_tasks = llm_config.get('llm_tasks', [])
-        soundbites_dir = self.run_folder / 'soundbites'
-        llm_dir = self.run_folder / 'llm'
-        llm_dir.mkdir(exist_ok=True)
-        call_ids = [d.name for d in soundbites_dir.iterdir() if d.is_dir()]
-        self.log_event('INFO', 'llm_stage_start', {'llm_dir': str(llm_dir)})
-        for call_id in call_ids:
-            master_transcript = self.get_master_transcript_path(call_id)
-            transcript_text = None
-            if master_transcript.exists():
-                with open(master_transcript, 'r', encoding='utf-8') as f:
-                    transcript_text = f.read()
-            # If transcript is too long, chunk by speaker
-            if transcript_text and len(transcript_text.split()) > 15000:
-                # Use per-speaker chunking
-                per_speaker = self.get_per_speaker_transcripts(call_id)
-                call_llm_dir = llm_dir / call_id
-                call_llm_dir.mkdir(parents=True, exist_ok=True)
-                speaker_outputs = {}
-                for speaker_id, speaker_text in per_speaker.items():
-                    speaker_outputs[speaker_id] = {}
-                    for task in llm_tasks:
-                        name = task.get('name', 'unnamed_task')
-                        prompt_template = task.get('prompt_template', '')
-                        output_file = f'{speaker_id}_{name}.txt'
-                        prompt = prompt_template.format(transcript=speaker_text)
-                        # Use the same LLM API logic as before
-                        output_path = call_llm_dir / output_file
-                        # ... (LLM API call logic, as in run_llm_task_for_call) ...
-                        # For now, just write the prompt for demonstration
-                        with open(output_path, 'w', encoding='utf-8') as f:
-                            f.write(prompt)
-                        speaker_outputs[speaker_id][name] = str(output_path)
-                        self.log_and_manifest(
-                            stage='llm',
-                            call_id=call_id,
-                            input_files=[f'per-speaker:{speaker_id}'],
-                            output_files=[str(output_path)],
-                            params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id},
-                            metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
-                            event='llm_task',
-                            result='success'
-                        )
-                # Aggregate per-speaker outputs into a summary file
-                agg_path = call_llm_dir / 'per_speaker_llm_outputs.json'
-                with open(agg_path, 'w', encoding='utf-8') as f:
-                    json.dump(speaker_outputs, f, indent=2)
-                self.log_and_manifest(
-                    stage='llm',
-                    call_id=call_id,
-                    input_files=None,
-                    output_files=[str(agg_path)],
-                    params={'aggregation': 'per-speaker'},
-                    metadata=None,
-                    event='llm_aggregation',
-                    result='success'
-                )
-            else:
-                # Use the original logic for short transcripts
-                call_llm_dir = llm_dir / call_id
-                call_llm_dir.mkdir(parents=True, exist_ok=True)
-                output_paths = self.run_llm_task_for_call(
-                    call_id=call_id,
-                    master_transcript=master_transcript,
-                    llm_config=llm_config,
-                    output_dir=call_llm_dir,
-                    llm_tasks=llm_tasks,
-                    global_llm_seed=self.global_llm_seed
-                )
-                for task in llm_tasks:
-                    name = task.get('name', 'unnamed_task')
-                    output_file = task.get('output_file', f'{name}.txt')
-                    output_path = call_llm_dir / output_file
-                    self.log_and_manifest(
-                        stage='llm',
-                        call_id=call_id,
-                        input_files=[str(master_transcript)],
-                        output_files=[str(output_path)],
-                        params={'task': name, 'prompt_template': task.get('prompt_template'), 'seed': output_paths.get('seed', None)},
-                        metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
-                        event='llm_task',
-                        result='success'
-                    )
-                self.log_event('INFO', 'llm_tasks_complete', {'call_id': call_id, 'llm_outputs': output_paths})
-
 def create_jobs_from_input(input_path: Path) -> List[Job]:
     """Create jobs from input path (can be a single file or directory)
     IMPORTANT: No PII (original filenames or paths) may be printed or logged here! Only output anonymized counts if needed.
@@ -1764,6 +1666,17 @@ def process_file_job_with_subid(job, run_folder: Path):
         job.data['output_name'] = new_name
     return orig_process_file_job(job, run_folder)
 
+# Utility to estimate token count
+try:
+    import tiktoken
+    def estimate_tokens(text, model="gpt-3.5-turbo"):
+        enc = tiktoken.encoding_for_model(model)
+        return len(enc.encode(text))
+except ImportError:
+    def estimate_tokens(text, model=None):
+        # Fallback: 1 token ≈ 4 chars (OpenAI heuristic)
+        return max(1, len(text) // 4)
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Audio Context Tool Orchestrator")
@@ -1773,7 +1686,9 @@ if __name__ == '__main__':
     parser.add_argument('--llm_config', type=str, default=None, help='Path to LLM task config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--llm-seed', type=int, default=None, help='Global seed for LLM tasks (default: random per task)')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to end of each call and between calls in show file')
-    parser.add_argument('--call-cutter', action='store_true', help='Enable CLAP-based call segmentation for single-file inputs (experimental)')
+    parser.add_argument('--call-cutter', action='store_true', help='Enable CLAP-based call segmentation for long files')
+    parser.add_argument('--url', action='append', help='Download and process audio from one or more URLs')
+    parser.add_argument('--mode', type=str, choices=['auto', 'single-file', 'calls'], default='auto', help='Workflow mode: auto (default), single-file, or calls')
     # Resume functionality arguments
     parser.add_argument('--resume', action='store_true', help='Enable resume functionality - skip completed stages')
     parser.add_argument('--resume-from', type=str, metavar='STAGE', help='Resume from a specific stage (skip all prior completed stages)')
@@ -1791,10 +1706,55 @@ if __name__ == '__main__':
         "\n\nExample: --resume-from diarization\n" +
         "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n" +
         "\nUse --llm-seed to set a global seed for LLM tasks (default: random per task).\n" +
-        "\nUse --call-cutter to enable CLAP-based call segmentation for single-file inputs (experimental).\n"
+        "\nUse --call-cutter to enable CLAP-based call segmentation for long files.\n"
     )
 
     args = parser.parse_args()
+
+    # --- URL download logic ---
+    url_files = []
+    url_metadata = []
+    if args.url:
+        import yt_dlp
+        from pathlib import Path
+        run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        run_folder = Path('outputs') / f'run-{run_ts}'
+        raw_inputs_dir = run_folder / 'raw_inputs'
+        raw_inputs_dir.mkdir(parents=True, exist_ok=True)
+        for url in args.url:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': str(raw_inputs_dir / '%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                    'preferredquality': '192',
+                }],
+                'writethumbnail': False,
+                'writeinfojson': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                # Find the downloaded file
+                title = info.get('title', 'downloaded')
+                ext = 'wav'
+                file_path = raw_inputs_dir / f"{title}.{ext}"
+                url_files.append(file_path)
+                url_metadata.append({
+                    'source_url': url,
+                    'title': title,
+                    'uploader': info.get('uploader'),
+                    'upload_date': info.get('upload_date'),
+                    'duration': info.get('duration'),
+                    'original_ext': info.get('ext'),
+                    'id': info.get('id'),
+                    'info_dict': info
+                })
+        # Set input_dir to raw_inputs_dir for downstream processing
+        args.input_dir = str(raw_inputs_dir)
 
     # Handle --force logic
     if args.output_folder and args.resume_from and args.force:
@@ -1982,7 +1942,5 @@ if __name__ == '__main__':
     if resume_mode:
         orchestrator.run_with_resume(call_tones=args.call_tones, resume=True, resume_from=resume_from_stage)
     else:
-        orchestrator.run(call_tones=args.call_tones)
-    if not resume_mode:
-        orchestrator.run_llm_stage(llm_config_path=args.llm_config)
+        orchestrator.run(mode=args.mode, call_cutter=args.call_cutter)
     # No redundant transcription after renaming

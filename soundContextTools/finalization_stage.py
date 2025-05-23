@@ -75,6 +75,17 @@ def embed_id3(mp3_path, tags: dict):
                 pass
     audio.save()
 
+def embed_lineage_id3(mp3_path, original_title, start_time=None, end_time=None):
+    try:
+        audio = ID3(mp3_path)
+    except mutagen.id3.ID3NoHeaderError:
+        audio = ID3()
+    lineage_comment = f"Source: {original_title}"
+    if start_time is not None and end_time is not None:
+        lineage_comment += f" | Timestamp: {start_time:.2f}-{end_time:.2f} sec"
+    audio.add(COMM(encoding=3, lang='eng', desc='lineage', text=lineage_comment))
+    audio.save(mp3_path)
+
 def run_finalization_stage(run_folder: Path, manifest: list):
     finalized_dir = run_folder / 'finalized'
     calls_dir = finalized_dir / 'calls'
@@ -105,6 +116,17 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                 'tracknumber': call_id,
                 'album': 'Audio Context Calls',
             })
+            # Retrieve original_title_for_id3 from manifest/job data
+            original_title = None
+            if 'entry' in locals() and entry is not None:
+                original_title = entry.get('original_title_for_id3', call_title)
+            else:
+                # Fallback: use call_title or a default value
+                original_title = call_title or 'unknown_source'
+            # Retrieve start/end time for the soundbite (if available)
+            start_time = entry.get('start_time')
+            end_time = entry.get('end_time')
+            embed_lineage_id3(mp3_path, original_title, start_time, end_time)
     # --- 2. Show ---
     show_wav = run_folder / 'show' / 'show.wav'
     show_json = run_folder / 'show' / 'show.json'
@@ -128,6 +150,17 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             'album': 'Audio Context Show',
             'comment': show_desc,
         })
+        # Retrieve original_title_for_id3 from manifest/job data
+        original_title = None
+        if 'entry' in locals() and entry is not None:
+            original_title = entry.get('original_title_for_id3', show_title)
+        else:
+            # Fallback: use show_title or a default value
+            original_title = show_title or 'unknown_source'
+        # Retrieve start/end time for the soundbite (if available)
+        start_time = entry.get('start_time')
+        end_time = entry.get('end_time')
+        embed_lineage_id3(show_mp3, original_title, start_time, end_time)
     # --- 3. Show TXT ---
     show_txt = show_dir / (show_title + '.txt')
     timeline = []
@@ -215,6 +248,17 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                         'timestamp': start,
                         'text': line
                     })
+                    # Retrieve original_title_for_id3 from manifest/job data
+                    original_title = None
+                    if 'entry' in locals() and entry is not None:
+                        original_title = entry.get('original_title_for_id3', transcript)
+                    else:
+                        # Fallback: use transcript or a default value
+                        original_title = transcript or 'unknown_source'
+                    # Retrieve start/end time for the soundbite (if available)
+                    start_time = start
+                    end_time = end
+                    embed_lineage_id3(mp3_path, original_title, start_time, end_time)
         # Sort all events by timestamp
         master_transcript_events_sorted = sorted(master_transcript_events, key=lambda x: x['timestamp'])
         # Write .txt
