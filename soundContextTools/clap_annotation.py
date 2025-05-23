@@ -57,10 +57,16 @@ def run_clap_annotation_on_chunk(chunk_waveform, sr, prompts, model, processor, 
 def run_clap_annotation(audio_path: Path, prompts: List[str], model_id: str = "laion/clap-htsat-unfused", chunk_length_sec=5, overlap_sec=2, confidence_threshold=0.5) -> List[Dict]:
     processor = ClapProcessor.from_pretrained(model_id)
     model = ClapModel.from_pretrained(model_id)
-    waveform, sr = torchaudio.load(str(audio_path))
-    if sr != 48000:
-        waveform = torchaudio.functional.resample(waveform, sr, 48000)
-        sr = 48000
+    try:
+        waveform, sr = torchaudio.load(str(audio_path))
+        if waveform.numel() == 0:
+            raise ValueError("Audio file is empty (0 elements)")
+        if sr != 48000:
+            waveform = torchaudio.functional.resample(waveform, sr, 48000)
+            sr = 48000
+    except Exception as e:
+        # Raise a controlled error to be caught by the caller
+        raise RuntimeError(f"Failed to load or process audio: {audio_path.name} ({str(e)})")
     chunks = chunk_audio(waveform, sr, chunk_length_sec, overlap_sec)
     all_results = []
     for idx, (chunk, start_time, end_time) in enumerate(chunks):
@@ -79,6 +85,7 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
     """
     Annotate all 'out' files in renamed_dir using CLAP and save results in clap_dir.
     Uses the specified CLAP model (default: fused model).
+    Skips and logs any files that are empty or unreadable.
     """
     if model is None:
         model = 'laion/clap-htsat-fused'  # Default to fused model
@@ -88,18 +95,13 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
             'dog barking', 'DTMF', 'ringing', 'yelling', 'music', 'laughter', 'crying', 'doorbell', 'car horn', 'applause', 'gunshot',
             'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence'
         ]
-    
-    # Check if renamed directory exists
     if not renamed_dir.exists():
         print(f"⚠️  Renamed directory does not exist: {renamed_dir}")
         return []
-    
-    # Check if directory has any 'out' files
     out_files = [f for f in renamed_dir.iterdir() if f.is_file() and '-out-' in f.name]
     if not out_files:
         print(f"⚠️  No 'out' files found in renamed directory: {renamed_dir}")
         return []
-    
     results = []
     for file in renamed_dir.iterdir():
         if not file.is_file() or '-out-' not in file.name:
@@ -109,14 +111,26 @@ def annotate_clap_for_out_files(renamed_dir: Path, clap_dir: Path, prompts: List
             continue
         out_dir = clap_dir / call_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
-        ann_path = out_dir / 'clap_annotations.json'
-        with open(ann_path, 'w', encoding='utf-8') as f:
-            json.dump(annotations, f, indent=2)
-        results.append({
-            'call_id': call_id,
-            'input_name': file.name,
-            'annotation_path': str(ann_path),
-            'accepted_annotations': annotations
-        })
+        try:
+            annotations = run_clap_annotation(file, prompts, model, chunk_length_sec, overlap_sec, confidence_threshold)
+            ann_path = out_dir / 'clap_annotations.json'
+            with open(ann_path, 'w', encoding='utf-8') as f:
+                json.dump(annotations, f, indent=2)
+            results.append({
+                'call_id': call_id,
+                'input_name': file.name,
+                'annotation_path': str(ann_path),
+                'accepted_annotations': annotations
+            })
+        except Exception as e:
+            # Log privacy-preserving error, skip file
+            error_msg = f"CLAP annotation failed for {file.name}: {str(e)}"
+            print(f"[WARN] {error_msg}")
+            results.append({
+                'call_id': call_id,
+                'input_name': file.name,
+                'annotation_path': None,
+                'accepted_annotations': [],
+                'error': error_msg
+            })
     return results 

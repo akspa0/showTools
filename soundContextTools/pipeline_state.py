@@ -422,6 +422,7 @@ PIPELINE_STAGES = [
     'ingestion',
     'separation', 
     'normalization',
+    'true_peak_normalization',
     'clap',
     'diarization',
     'segmentation',

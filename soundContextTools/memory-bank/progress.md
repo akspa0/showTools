@@ -28,6 +28,9 @@ Tracks what works, what's left to build, current status, and known issues.
   - Show MP3 and .txt description named after LLM show title, fallback to completed-show.mp3 if needed
   - Manifest and logs updated with all finalized outputs and metadata
   - Two-stage LLM workflow: per-call titles/synopses, then show-level title/description
+- Resume and status operations are now fully privacy-preserving.
+- No PII filenames are ever shown or logged after initial ingestion.
+- Output folders are clearly separated and referenced by anonymized run IDs.
 
 ## What's Left to Build
 
@@ -50,6 +53,8 @@ Tracks what works, what's left to build, current status, and known issues.
 - Complete and test finalization stage for MP3 outputs and metadata
 - Ensure robust fallback logic for LLM output
 - Ongoing documentation and memory bank updates as the project evolves
+- Further harden error handling to ensure no accidental PII leaks in rare error cases.
+- Optionally, add a test suite to simulate resume/status on output folders with various edge cases.
 
 ## Current Status
 
@@ -63,4 +68,5 @@ Pipeline is fully functional, privacy-focused, robust, and extensible. Resume fu
 - Resume controls could be more granular (next enhancement)
 - Need real-world testing with actual audio files
 - Performance monitoring would be valuable addition
-- Continue monitoring as new features are added 
+- Continue monitoring as new features are added
+- If a user manually copies PII-containing files into an output folder, those could be exposed, but this is outside the pipeline's control. 

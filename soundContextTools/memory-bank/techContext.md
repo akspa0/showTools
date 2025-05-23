@@ -40,4 +40,10 @@ Describes technologies used, development setup, technical constraints, and depen
 - transformers (for CLAP, https://huggingface.co/docs/transformers/model_doc/clap)
 - audiomentations (https://github.com/iver56/audiomentations)
 - mutagen (https://mutagen.readthedocs.io/en/latest/)
-- torchaudio, soundfile, numpy, librosa, pyannote, pyloudnorm, tqdm, rich, requests 
+- torchaudio, soundfile, numpy, librosa, pyannote, pyloudnorm, tqdm, rich, requests
+
+## Tech Context
+
+- CLI now supports `--output-folder` for privacy-preserving resume.
+- Argument parser and main script logic refactored for clear separation of fresh vs. resume runs.
+- All resume/status/clear/force commands now operate on the output folder. 

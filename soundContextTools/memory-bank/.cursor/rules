@@ -1,0 +1,8 @@
+# cursor-rules.md
+
+## Project Intelligence & Patterns
+
+- When resuming or showing status, the pipeline must never scan or log the original input directory or filenames. All operations must be based on the anonymized output folder structure.
+- `input_dir` is only required for new runs; resuming is always based on the output folder.
+- All job and file discovery for resume is based on anonymized, already-processed files in the output folder.
+- Status and resume commands (`--show-resume-status`, `--stage-status`) must operate on the output folder, never on the original input. 

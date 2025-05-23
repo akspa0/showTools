@@ -77,4 +77,10 @@ Documents system architecture, key technical decisions, design patterns, and com
 - Produce new call files with chronological call index as filename and LLM-generated call title, sanitized of all punctuation from LLM call title response
 - Optionally apply tones to call files (if not in show-mode)
 - Show output: concatenate all valid calls (>10s, error-free) into a single WAV file, insert tones between calls, and include a text file listing call order, names, timestamps, and metadata
-- All workflows are JSON files in workflows/ (routing, prompts, tasks, etc.), user-specific data in config/ 
+- All workflows are JSON files in workflows/ (routing, prompts, tasks, etc.), user-specific data in config/
+
+# System Patterns
+
+- Resume logic is now output-folder-centric, not input-centric.
+- All job creation and file discovery for resume is based on the anonymized `renamed/` directory.
+- Console output for available folders is sanitized and only shows anonymized run folder names. 

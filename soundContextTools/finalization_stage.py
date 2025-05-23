@@ -15,12 +15,51 @@ def sanitize_filename(name, max_length=48):
     name = re.sub(r'[^A-Za-z0-9_\-]', '', name)
     return name[:max_length] or 'untitled'
 
-def wav_to_mp3(wav_path, mp3_path, bitrate='192k'):
-    # Use ffmpeg for robust conversion
+def wav_to_mp3_youtube_style(wav_path, mp3_path, bitrate='192k'):
+    """
+    Convert WAV to MP3 with YouTube-style audio processing:
+    - Dynamic range compression 
+    - Loudness normalization to -14 LUFS
+    - True peak limiting to -1.0 dBTP
+    - High-frequency clarity enhancement
+    """
     cmd = [
-        'ffmpeg', '-y', '-i', str(wav_path), '-codec:a', 'libmp3lame', '-qscale:a', '2', '-b:a', bitrate, str(mp3_path)
+        'ffmpeg', '-y', '-i', str(wav_path),
+        # Audio processing chain (YouTube-style)
+        '-af', 
+        # 1. Dynamic range compression (moderate ratio for broadcast)
+        'acompressor=ratio=3:threshold=-18dB:attack=5:release=50:makeup=2dB,'
+        # 2. Loudness normalization to -14 LUFS (YouTube standard)
+        'loudnorm=I=-14:TP=-1.0:LRA=7:measured_I=-14:measured_LRA=7:measured_TP=-1.0:measured_thresh=-24,'
+        # 3. High-frequency clarity boost (subtle)
+        'highpass=f=80,treble=g=1.5:f=8000,'
+        # 4. Final true peak limiter
+        'alimiter=level_in=1:level_out=0.95:limit=0.95:attack=5:release=50',
+        # MP3 encoding
+        '-codec:a', 'libmp3lame', '-qscale:a', '2', '-b:a', bitrate,
+        str(mp3_path)
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"[WARN] YouTube-style processing failed for {wav_path}, falling back to simple conversion")
+        # Fallback to simple conversion
+        wav_to_mp3_simple(wav_path, mp3_path, bitrate)
+
+def wav_to_mp3_simple(wav_path, mp3_path, bitrate='192k'):
+    """Simple WAV to MP3 conversion without processing"""
+    cmd = [
+        'ffmpeg', '-y', '-i', str(wav_path), 
+        '-codec:a', 'libmp3lame', '-qscale:a', '2', '-b:a', bitrate, 
+        str(mp3_path)
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def wav_to_mp3(wav_path, mp3_path, bitrate='192k', youtube_style=True):
+    """Convert WAV to MP3 with optional YouTube-style processing"""
+    if youtube_style:
+        wav_to_mp3_youtube_style(wav_path, mp3_path, bitrate)
+    else:
+        wav_to_mp3_simple(wav_path, mp3_path, bitrate)
 
 def embed_id3(mp3_path, tags: dict):
     try:

@@ -7,6 +7,7 @@ from tqdm import tqdm
 from rich.console import Console
 from rich.traceback import install as rich_traceback_install
 import uuid
+import numpy as np
 from file_ingestion import process_file_job, SUPPORTED_EXTENSIONS, TYPE_MAP
 from audio_separation import separate_audio_file
 from clap_annotation import annotate_clap_for_out_files
@@ -360,6 +361,7 @@ class PipelineOrchestrator:
         Resample all speaker segment WAVs to 16kHz mono for ASR. Save as <segment>_16k.wav and update manifest.
         Overwrites any old _16k.wav files. Adds debug logging for waveform shape.
         Logs every file written and updates manifest.
+        Skips and logs empty or unreadable files.
         """
         speakers_dir = self.run_folder / 'speakers'
         resampled_segments = []
@@ -372,46 +374,77 @@ class PipelineOrchestrator:
                 out_path = wav_path.with_name(wav_path.stem + '_16k.wav')
                 if out_path.exists():
                     out_path.unlink()
-                waveform, sr = torchaudio.load(str(wav_path))
-                print(f"[DEBUG] Loaded: {wav_path} shape={waveform.shape} sr={sr} dtype={waveform.dtype}")
-                if waveform.ndim == 3:
-                    if waveform.shape[0] == 1 and waveform.shape[2] == 2:
-                        waveform = waveform.squeeze(0).mean(dim=1, keepdim=True).transpose(0, 1)
-                        print(f"[DEBUG] Squeezed and averaged: shape={waveform.shape}")
-                    elif waveform.shape[0] == 1 and waveform.shape[1] == 2:
-                        waveform = waveform.squeeze(0).mean(dim=0, keepdim=True)
-                        print(f"[DEBUG] Squeezed and averaged: shape={waveform.shape}")
+                try:
+                    waveform, sr = torchaudio.load(str(wav_path))
+                    print(f"[DEBUG] Loaded: {wav_path} shape={waveform.shape} sr={sr} dtype={waveform.dtype}")
+                    if waveform.numel() == 0 or (waveform.ndim == 2 and waveform.shape[1] == 0):
+                        warn_msg = f"Segment file is empty, skipping: {wav_path.name}"
+                        print(f"[WARN] {warn_msg}")
+                        self.log_and_manifest(
+                            stage='resampled_skipped',
+                            call_id=entry.get('call_id'),
+                            input_files=[str(wav_path)],
+                            output_files=[],
+                            params={'reason': 'empty file'},
+                            metadata=None,
+                            event='file_skipped',
+                            result='skipped',
+                            error=warn_msg
+                        )
+                        continue
+                    if waveform.ndim == 3:
+                        if waveform.shape[0] == 1 and waveform.shape[2] == 2:
+                            waveform = waveform.squeeze(0).mean(dim=1, keepdim=True).transpose(0, 1)
+                            print(f"[DEBUG] Squeezed and averaged: shape={waveform.shape}")
+                        elif waveform.shape[0] == 1 and waveform.shape[1] == 2:
+                            waveform = waveform.squeeze(0).mean(dim=0, keepdim=True)
+                            print(f"[DEBUG] Squeezed and averaged: shape={waveform.shape}")
+                        else:
+                            print(f"[WARN] Unexpected 3D shape: {waveform.shape}")
+                    elif waveform.ndim == 2:
+                        if waveform.shape[0] > 1:
+                            waveform = waveform.mean(dim=0, keepdim=True)
+                            print(f"[DEBUG] Averaged channels: shape={waveform.shape}")
                     else:
-                        print(f"[WARN] Unexpected 3D shape: {waveform.shape}")
-                elif waveform.ndim == 2:
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                        print(f"[DEBUG] Averaged channels: shape={waveform.shape}")
-                else:
-                    print(f"[WARN] Unexpected waveform ndim: {waveform.ndim} shape={waveform.shape}")
-                if sr != 16000:
-                    waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    sr = 16000
-                    print(f"[DEBUG] After resample: shape={waveform.shape} sr={sr}")
-                if waveform.ndim != 2 or waveform.shape[0] != 1:
-                    print(f"[WARN] Skipping {wav_path}: shape after mono/resample is {waveform.shape}, expected [1, time]")
+                        print(f"[WARN] Unexpected waveform ndim: {waveform.ndim} shape={waveform.shape}")
+                    if sr != 16000:
+                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+                        sr = 16000
+                        print(f"[DEBUG] After resample: shape={waveform.shape} sr={sr}")
+                    if waveform.ndim != 2 or waveform.shape[0] != 1:
+                        print(f"[WARN] Skipping {wav_path}: shape after mono/resample is {waveform.shape}, expected [1, time]")
+                        continue
+                    torchaudio.save(str(out_path), waveform, sr)
+                    self.log_and_manifest(
+                        stage='resampled',
+                        call_id=entry.get('call_id'),
+                        input_files=[str(wav_path)],
+                        output_files=[str(out_path)],
+                        params={'target_sr': 16000},
+                        metadata=None,
+                        event='file_written',
+                        result='success'
+                    )
+                    resampled_entry = dict(entry)
+                    resampled_entry['wav_16k'] = str(out_path)
+                    resampled_entry['stage'] = 'resampled'
+                    self.manifest.append(resampled_entry)
+                    resampled_segments.append(resampled_entry)
+                except Exception as e:
+                    warn_msg = f"Resample failed for {wav_path.name}: {str(e)}"
+                    print(f"[WARN] {warn_msg}")
+                    self.log_and_manifest(
+                        stage='resampled_skipped',
+                        call_id=entry.get('call_id'),
+                        input_files=[str(wav_path)],
+                        output_files=[],
+                        params={'reason': 'exception'},
+                        metadata=None,
+                        event='file_skipped',
+                        result='skipped',
+                        error=warn_msg
+                    )
                     continue
-                torchaudio.save(str(out_path), waveform, sr)
-                self.log_and_manifest(
-                    stage='resampled',
-                    call_id=entry.get('call_id'),
-                    input_files=[str(wav_path)],
-                    output_files=[str(out_path)],
-                    params={'target_sr': 16000},
-                    metadata=None,
-                    event='file_written',
-                    result='success'
-                )
-                resampled_entry = dict(entry)
-                resampled_entry['wav_16k'] = str(out_path)
-                resampled_entry['stage'] = 'resampled'
-                self.manifest.append(resampled_entry)
-                resampled_segments.append(resampled_entry)
         self.log_event('INFO', 'resample_segments_complete', {'count': len(resampled_segments)})
 
     def run_transcription_stage(self, asr_engine='parakeet', asr_config=None):
@@ -897,90 +930,179 @@ class PipelineOrchestrator:
                 )
         self.log_event('INFO', 'normalization_complete', {'normalized_dir': str(normalized_dir)})
 
+    def run_true_peak_normalization_stage(self):
+        """
+        Apply true peak normalization to prevent digital clipping on normalized vocals.
+        Uses -1.0 dBTP (decibels True Peak) limit which is broadcast standard.
+        Logs every file written and updates manifest.
+        """
+        import pyloudnorm as pyln
+        import soundfile as sf
+        from pathlib import Path
+        
+        normalized_dir = self.run_folder / 'normalized'
+        true_peak_dir = self.run_folder / 'true_peak_normalized'
+        true_peak_dir.mkdir(exist_ok=True)
+        
+        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -1.0})
+        
+        for call_id in os.listdir(normalized_dir):
+            call_norm_dir = normalized_dir / call_id
+            if not call_norm_dir.is_dir():
+                continue
+            
+            call_tp_dir = true_peak_dir / call_id
+            call_tp_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Process all vocal files (both traditional and conversation)
+            for vocal_file in call_norm_dir.glob('*.wav'):
+                src = vocal_file
+                dst = call_tp_dir / vocal_file.name
+                
+                try:
+                    audio, sr = sf.read(str(src))
+                    
+                    # Ensure mono for processing
+                    if audio.ndim > 1:
+                        audio = audio.mean(axis=1)
+                    
+                    # Apply true peak limiting to -1.0 dBTP
+                    meter = pyln.Meter(sr)
+                    peak_normalized = pyln.normalize.peak(audio, -1.0)
+                    
+                    # Save the true peak normalized audio
+                    sf.write(str(dst), peak_normalized, sr)
+                    
+                    # Calculate true peak level for logging
+                    true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
+                    
+                    self.log_and_manifest(
+                        stage='true_peak_normalized',
+                        call_id=call_id,
+                        input_files=[str(src)],
+                        output_files=[str(dst)],
+                        params={'target_dbtp': -1.0},
+                        metadata={'measured_true_peak_db': true_peak_db},
+                        event='file_written',
+                        result='success'
+                    )
+                    
+                except Exception as e:
+                    self.log_event('ERROR', 'true_peak_normalization_failed', {
+                        'call_id': call_id,
+                        'file': vocal_file.name,
+                        'error': str(e)
+                    })
+        
+        self.log_event('INFO', 'true_peak_normalization_complete', {'true_peak_dir': str(true_peak_dir)})
+
     def run_remix_stage(self, call_tones=False):
         """
-        For each call, mix normalized vocals + 50% instrumental for each channel, then combine with 60/40 stereo panning:
+        For each call, mix true peak normalized vocals + 50% instrumental for each channel, then combine with 60/40 stereo panning:
         stereo_left = 0.6 * left_mix + 0.4 * right_mix
         stereo_right = 0.4 * left_mix + 0.6 * right_mix
-        Output stereo remixed_call.wav. If call_tones is set, append tones.wav from project root to the end.
+        Output stereo remixed_call.wav. Tones are NOT appended here; tones are handled in the show stage only.
         Logs every file written and updates manifest.
-        Always uses normalized vocals from normalized/ folder.
+        Always uses true peak normalized vocals for best audio quality.
         """
         import soundfile as sf
         import numpy as np
         from pathlib import Path
+        
+        # Use true peak normalized vocals (if available) or fall back to regular normalized
+        true_peak_dir = self.run_folder / 'true_peak_normalized'
         normalized_dir = self.run_folder / 'normalized'
+        vocals_dir = true_peak_dir if true_peak_dir.exists() else normalized_dir
+        
         separated_dir = self.run_folder / 'separated'
         call_dir = self.run_folder / 'call'
         call_dir.mkdir(exist_ok=True)
         tones_path = Path('tones.wav')
-        self.log_event('INFO', 'remix_start', {'normalized_dir': str(normalized_dir)})
-        for call_id in os.listdir(normalized_dir):
-            call_norm_dir = normalized_dir / call_id
+        
+        self.log_event('INFO', 'remix_start', {
+            'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized',
+            'vocals_dir': str(vocals_dir)
+        })
+        
+        for call_id in os.listdir(vocals_dir):
+            call_vocals_dir = vocals_dir / call_id
             call_sep_dir = separated_dir / call_id
-            if not call_norm_dir.is_dir() or not call_sep_dir.is_dir():
+            if not call_vocals_dir.is_dir() or not call_sep_dir.is_dir():
                 continue
             out_call_dir = call_dir / call_id
             out_call_dir.mkdir(parents=True, exist_ok=True)
-            # Always use normalized vocals for remix
-            left_vocal_path = call_norm_dir / "left-vocals.wav"
-            right_vocal_path = call_norm_dir / "right-vocals.wav"
-            left_instr_path = call_sep_dir / "left-instrumental.wav"
-            right_instr_path = call_sep_dir / "right-instrumental.wav"
-            if not (left_vocal_path.exists() and right_vocal_path.exists() and left_instr_path.exists() and right_instr_path.exists()):
-                continue
-            # Mix vocals + 0.5 * instrumental for each channel
-            left_vocal, sr = sf.read(str(left_vocal_path))
-            right_vocal, _ = sf.read(str(right_vocal_path))
-            left_instr, _ = sf.read(str(left_instr_path))
-            right_instr, _ = sf.read(str(right_instr_path))
-            if left_vocal.ndim > 1:
-                left_vocal = left_vocal.mean(axis=1)
-            if right_vocal.ndim > 1:
-                right_vocal = right_vocal.mean(axis=1)
-            if left_instr.ndim > 1:
-                left_instr = left_instr.mean(axis=1)
-            if right_instr.ndim > 1:
-                right_instr = right_instr.mean(axis=1)
-            left_mix = left_vocal + 0.5 * left_instr
-            right_mix = right_vocal + 0.5 * right_instr
-            # 60/40 panning: stereo_left = 0.6*left_mix + 0.4*right_mix, stereo_right = 0.4*left_mix + 0.6*right_mix
-            min_len = min(len(left_mix), len(right_mix))
-            left_mix = left_mix[:min_len]
-            right_mix = right_mix[:min_len]
-            stereo_left = 0.6 * left_mix + 0.4 * right_mix
-            stereo_right = 0.4 * left_mix + 0.6 * right_mix
-            stereo = np.stack([stereo_left, stereo_right], axis=-1)
+            
+            # Handle both traditional stereo calls and single conversation files
+            if (call_vocals_dir / "left-vocals.wav").exists() and (call_vocals_dir / "right-vocals.wav").exists():
+                # Traditional stereo call processing
+                left_vocal_path = call_vocals_dir / "left-vocals.wav"
+                right_vocal_path = call_vocals_dir / "right-vocals.wav"
+                left_instr_path = call_sep_dir / "left-instrumental.wav"
+                right_instr_path = call_sep_dir / "right-instrumental.wav"
+                
+                if not (left_instr_path.exists() and right_instr_path.exists()):
+                    continue
+                
+                # Mix vocals + 0.5 * instrumental for each channel
+                left_vocal, sr = sf.read(str(left_vocal_path))
+                right_vocal, _ = sf.read(str(right_vocal_path))
+                left_instr, _ = sf.read(str(left_instr_path))
+                right_instr, _ = sf.read(str(right_instr_path))
+                
+                if left_vocal.ndim > 1:
+                    left_vocal = left_vocal.mean(axis=1)
+                if right_vocal.ndim > 1:
+                    right_vocal = right_vocal.mean(axis=1)
+                if left_instr.ndim > 1:
+                    left_instr = left_instr.mean(axis=1)
+                if right_instr.ndim > 1:
+                    right_instr = right_instr.mean(axis=1)
+                
+                left_mix = left_vocal + 0.5 * left_instr
+                right_mix = right_vocal + 0.5 * right_instr
+                
+                # 60/40 panning: stereo_left = 0.6*left_mix + 0.4*right_mix, stereo_right = 0.4*left_mix + 0.6*right_mix
+                min_len = min(len(left_mix), len(right_mix))
+                left_mix = left_mix[:min_len]
+                right_mix = right_mix[:min_len]
+                stereo_left = 0.6 * left_mix + 0.4 * right_mix
+                stereo_right = 0.4 * left_mix + 0.6 * right_mix
+                stereo = np.stack([stereo_left, stereo_right], axis=-1)
+                
+                input_files = [str(left_vocal_path), str(right_vocal_path), str(left_instr_path), str(right_instr_path)]
+                
+            else:
+                # Single conversation file processing (mono to stereo)
+                conversation_vocal = None
+                for vocal_file in call_vocals_dir.glob('*.wav'):
+                    conversation_vocal = vocal_file
+                    break
+                
+                if not conversation_vocal:
+                    continue
+                
+                # Read conversation audio and create stereo mix
+                vocal_audio, sr = sf.read(str(conversation_vocal))
+                if vocal_audio.ndim > 1:
+                    vocal_audio = vocal_audio.mean(axis=1)
+                
+                # Create stereo from mono (no instrumental for single files)
+                stereo = np.stack([vocal_audio, vocal_audio], axis=-1)
+                input_files = [str(conversation_vocal)]
+            
             remixed_path = out_call_dir / "remixed_call.wav"
             sf.write(str(remixed_path), stereo, sr)
+            
             self.log_and_manifest(
                 stage='remix',
                 call_id=call_id,
-                input_files=[str(left_vocal_path), str(right_vocal_path), str(left_instr_path), str(right_instr_path)],
+                input_files=input_files,
                 output_files=[str(remixed_path)],
-                params={'panning': '60/40 split'},
-                metadata=None,
+                params={'panning': '60/40 split' if len(input_files) > 2 else 'mono to stereo'},
+                metadata={'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized'},
                 event='file_written',
                 result='success'
             )
-            if call_tones and tones_path.exists():
-                remixed, _ = sf.read(str(remixed_path))
-                tones, tones_sr = sf.read(str(tones_path))
-                if tones_sr != sr:
-                    import librosa
-                    tones = librosa.resample(tones, orig_sr=tones_sr, target_sr=sr)
-                remixed_full = np.concatenate([remixed, tones], axis=0)
-                sf.write(str(remixed_path), remixed_full, sr)
-                self.log_and_manifest(
-                    stage='remix',
-                    call_id=call_id,
-                    input_files=[str(remixed_path), str(tones_path)],
-                    output_files=[str(remixed_path)],
-                    params={'append_tones': True},
-                    metadata=None,
-                    event='file_written',
-                    result='success'
-                )
         self.log_event('INFO', 'remix_complete', {'call_dir': str(call_dir)})
 
     def run_show_stage(self, call_tones=False):
@@ -990,6 +1112,7 @@ class PipelineOrchestrator:
         Panning is preserved from the remix stage for each call.
         Logs every file written and updates manifest.
         Always uses remixed calls built from normalized vocals.
+        If call_tones is set, insert tones.wav between calls (not after the last call).
         """
         import soundfile as sf
         import numpy as np
@@ -1034,7 +1157,21 @@ class PipelineOrchestrator:
                 'end': end
             })
             cur_time = end
-            # Tones are already appended to each call in the remix stage; do NOT insert tones between calls here.
+            # Insert tones between calls if call_tones is set and not the last call
+            if call_tones and idx < len(call_files) - 1 and tones_path.exists():
+                tones, tones_sr = sf.read(str(tones_path))
+                if tones_sr != sr:
+                    import librosa
+                    tones = librosa.resample(tones.T, orig_sr=tones_sr, target_sr=sr).T
+                tones_start = cur_time
+                tones_end = tones_start + tones.shape[0] / sr
+                show_audio.append(tones)
+                show_timeline.append({
+                    'tones': True,
+                    'start': tones_start,
+                    'end': tones_end
+                })
+                cur_time = tones_end
         if show_audio:
             show_audio = np.concatenate(show_audio, axis=0)
             sf.write(str(show_wav_path), show_audio, sr, subtype='PCM_16')
@@ -1104,6 +1241,7 @@ class PipelineOrchestrator:
         self.add_separation_jobs()
         self.run_audio_separation_stage()
         self.run_normalization_stage()
+        self.run_true_peak_normalization_stage()
         self.run_clap_annotation_stage()
         self.run_diarization_stage()
         self.run_speaker_segmentation_stage()
@@ -1197,6 +1335,7 @@ class PipelineOrchestrator:
             ('ingestion', self._run_ingestion_jobs),
             ('separation', lambda: (self.add_separation_jobs(), self.run_audio_separation_stage())),
             ('normalization', self.run_normalization_stage),
+            ('true_peak_normalization', self.run_true_peak_normalization_stage),
             ('clap', self.run_clap_annotation_stage),
             ('diarization', self.run_diarization_stage),
             ('segmentation', self.run_speaker_segmentation_stage),
@@ -1206,7 +1345,8 @@ class PipelineOrchestrator:
             ('soundbite_finalization', self.run_final_soundbite_stage),
             ('llm', self.run_llm_stage),
             ('remix', lambda: self.run_remix_stage(call_tones=call_tones)),
-            ('show', lambda: self.run_show_stage(call_tones=call_tones))
+            ('show', lambda: self.run_show_stage(call_tones=call_tones)),
+            ('finalization', self.run_finalization_stage)
         ]
         
         # Run each stage with resume support
@@ -1223,12 +1363,18 @@ class PipelineOrchestrator:
                 console.print(f"\n[yellow]To resume from this point, run with --resume[/]")
                 raise
         
+        # Write final manifest and log
+        self.write_manifest()
+        self.write_log()
+        
         # Final summary
         console.print("\n[bold green]🎉 Pipeline completed successfully![/]")
         print_resume_status(self.run_folder, detailed=True)
 
 def create_jobs_from_input(input_path: Path) -> List[Job]:
-    """Create jobs from input path (can be a single file or directory)"""
+    """Create jobs from input path (can be a single file or directory)
+    IMPORTANT: No PII (original filenames or paths) may be printed or logged here! Only output anonymized counts if needed.
+    """
     all_files = []
     seen_names = set()
     
@@ -1256,17 +1402,17 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
                 all_files.append((orig_path, base_name))
     else:
         # Input path doesn't exist or is neither file nor directory
-        print(f"❌ Input path does not exist or is invalid: {input_path}")
+        # No PII in error message
+        print(f"❌ Input path does not exist or is invalid.")
         return []
     
     if not all_files:
-        print(f"❌ No supported audio files found in: {input_path}")
+        print(f"❌ No supported audio files found in input.")
         print(f"Supported extensions: {SUPPORTED_EXTENSIONS}")
         return []
     
-    print(f"📁 Found {len(all_files)} supported audio file(s) to process")
-    for orig_path, base_name in all_files:
-        print(f"   📄 {base_name} ({orig_path})")
+    # Only output anonymized count, never filenames or paths
+    print(f"🔧 Created {len(all_files)} job(s) for processing.")
     
     # Group files into tuples by timestamp
     tuple_groups = {}
@@ -1283,13 +1429,11 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
             tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
         else:
             # Treat single audio files as 'out' files for full pipeline processing
-            print(f"   🔄 Treating single file as 'out' file for full pipeline processing")
             file_type = 'out'  # Force single files to be processed as 'out' files
             tuple_key = ts_str
             if tuple_key not in tuple_groups:
                 tuple_groups[tuple_key] = []
             tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
-    
     jobs = []
     # Add tuple jobs (shared index, unique subid)
     for idx, (ts_str, files) in enumerate(sorted(tuple_groups.items())):
@@ -1309,9 +1453,8 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
                 'ext': ext
             }
             jobs.append(Job(job_id=f"tuple_{idx}_{subid}_{file_type}", data=job_data))
-    
     # Note: No separate single jobs now - all files are processed as tuples
-    print(f"🔧 Created {len(jobs)} job(s): {len(tuple_groups)} tuple groups (including single files treated as 'out' files)")
+    print(f"🔧 Created {len(jobs)} anonymized job(s): {len(tuple_groups)} tuple groups.")
     return jobs
 
 def extract_type(filename):
@@ -1337,7 +1480,8 @@ def process_file_job_with_subid(job, run_folder: Path):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Audio Context Tool Orchestrator")
-    parser.add_argument('input_dir', type=str, help='Input directory')
+    parser.add_argument('input_dir', type=str, nargs='?', help='Input directory (required for fresh runs, optional when resuming)')
+    parser.add_argument('--output-folder', type=str, help='Existing output folder to resume from (e.g., outputs/run-20250522-211044)')
     parser.add_argument('--asr_engine', type=str, choices=['parakeet', 'whisper'], default='parakeet', help='ASR engine to use for transcription (default: parakeet)')
     parser.add_argument('--llm_config', type=str, default=None, help='Path to LLM task config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to end of each call and between calls in show file')
@@ -1351,69 +1495,107 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    # Handle status-only commands first
-    if args.show_resume_status:
-        from resume_utils import print_resume_status
-        run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        # Try to find most recent run folder
-        if Path("outputs").exists():
-            run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
-            if run_folders:
-                run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
-        print_resume_status(run_folder, detailed=True)
-        exit(0)
-    
-    if args.stage_status:
-        from resume_utils import print_stage_status
-        run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        # Try to find most recent run folder
-        if Path("outputs").exists():
-            run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
-            if run_folders:
-                run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
-        print_stage_status(run_folder, args.stage_status)
-        exit(0)
-    
-    # Initialize orchestrator
-    input_dir = Path(args.input_dir)
-    run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-    run_folder = Path('outputs') / f'run-{run_ts}'
-    
-    # Create orchestrator with proper parameters
-    orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
-    
-    # Create jobs from input directory
-    jobs = create_jobs_from_input(input_dir)
-    for job in jobs:
-        orchestrator.add_job(job)
-    
-    # Handle clear-from command
-    if args.clear_from:
-        from resume_utils import ResumeHelper
-        helper = ResumeHelper(orchestrator.run_folder)
-        helper.clear_from_stage(args.clear_from)
-        print(f"✅ Cleared completion status from '{args.clear_from}' onwards")
-        exit(0)
-    
-    # Handle force-rerun command
-    if args.force_rerun:
-        from resume_utils import ResumeHelper
-        helper = ResumeHelper(orchestrator.run_folder)
-        helper.force_rerun_stage(args.force_rerun)
-        print(f"✅ Forced stage '{args.force_rerun}' to be re-run")
-        # Continue with normal run
-    
-    # Determine resume mode
-    resume_mode = args.resume or args.resume_from or args.force_rerun
+    # Determine if we're resuming from an existing folder or starting fresh
+    if args.output_folder:
+        run_folder = Path(args.output_folder)
+        if not run_folder.exists():
+            print(f"❌ Output folder not found: {run_folder}")
+            print(f"Available folders:")
+            outputs_dir = Path("outputs")
+            if outputs_dir.exists():
+                run_folders = [d.name for d in outputs_dir.iterdir() if d.is_dir() and d.name.startswith("run-")]
+                if run_folders:
+                    for folder in sorted(run_folders, reverse=True)[:5]:
+                        print(f"   outputs/{folder}")
+                else:
+                    print(f"   No run folders found in outputs/")
+            else:
+                print(f"   outputs/ directory does not exist")
+            exit(1)
+        print(f"🔄 Resuming from existing folder: {run_folder}")
+
+        # Handle status-only commands for specific folder
+        if args.show_resume_status:
+            from resume_utils import print_resume_status
+            print_resume_status(run_folder, detailed=True)
+            exit(0)
+        if args.stage_status:
+            from resume_utils import print_stage_status
+            print_stage_status(run_folder, args.stage_status)
+            exit(0)
+        if args.clear_from:
+            from resume_utils import ResumeHelper
+            helper = ResumeHelper(run_folder)
+            helper.clear_from_stage(args.clear_from)
+            print(f"✅ Cleared completion status from '{args.clear_from}' onwards")
+            exit(0)
+        if args.force_rerun:
+            from resume_utils import ResumeHelper
+            helper = ResumeHelper(run_folder)
+            helper.force_rerun_stage(args.force_rerun)
+            print(f"✅ Forced stage '{args.force_rerun}' to be re-run")
+            # Continue with normal run
+
+        # Create orchestrator for existing folder - DO NOT create or reconstruct jobs
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        # Load manifest if it exists
+        manifest_path = run_folder / 'manifest.json'
+        if manifest_path.exists():
+            import json
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                orchestrator.manifest = json.load(f)
+        # No job creation or file analysis here!
+
+    else:
+        # Starting fresh run
+        if not args.input_dir:
+            print("❌ input_dir is required when starting a fresh run")
+            print("💡 To resume an existing run, use: --output-folder outputs/run-YYYYMMDD-HHMMSS")
+            exit(1)
+        if args.show_resume_status:
+            from resume_utils import print_resume_status
+            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            if Path("outputs").exists():
+                run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
+                if run_folders:
+                    run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
+            print_resume_status(run_folder, detailed=True)
+            exit(0)
+        if args.stage_status:
+            from resume_utils import print_stage_status
+            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            if Path("outputs").exists():
+                run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
+                if run_folders:
+                    run_folder = max(run_folders, key=lambda x: x.stat().st_mtime)
+            print_stage_status(run_folder, args.stage_status)
+            exit(0)
+        input_dir = Path(args.input_dir)
+        run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        run_folder = Path('outputs') / f'run-{run_ts}'
+        print(f"🆕 Starting fresh run: {run_folder}")
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        jobs = create_jobs_from_input(input_dir)
+        for job in jobs:
+            orchestrator.add_job(job)
+        if args.clear_from:
+            from resume_utils import ResumeHelper
+            helper = ResumeHelper(orchestrator.run_folder)
+            helper.clear_from_stage(args.clear_from)
+            print(f"✅ Cleared completion status from '{args.clear_from}' onwards")
+            exit(0)
+        if args.force_rerun:
+            from resume_utils import ResumeHelper
+            helper = ResumeHelper(orchestrator.run_folder)
+            helper.force_rerun_stage(args.force_rerun)
+            print(f"✅ Forced stage '{args.force_rerun}' to be re-run")
+            # Continue with normal run
+    resume_mode = args.resume or args.resume_from or args.force_rerun or args.output_folder
     resume_from_stage = args.resume_from
-    
-    # Run the pipeline
     if resume_mode:
         orchestrator.run_with_resume(call_tones=args.call_tones, resume=True, resume_from=resume_from_stage)
     else:
         orchestrator.run(call_tones=args.call_tones)
-    
-    # Run LLM stage after all other stages (if not using resume, or if resume doesn't handle it)
     if not resume_mode:
         orchestrator.run_llm_stage(llm_config_path=args.llm_config)
-    # No redundant transcription after renaming 
+    # No redundant transcription after renaming

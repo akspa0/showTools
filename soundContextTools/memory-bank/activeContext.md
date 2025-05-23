@@ -26,6 +26,12 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
   - Manifest and logs updated with all finalized outputs and metadata
   - Two-stage LLM workflow: per-call titles/synopses, then show-level title/description
   - Show.txt includes the full show description and a list of call titles with their timestamps
+- **Privacy-first pipeline refactor: No PII exposure during resume or status operations.**
+- **Resume functionality now uses `--output-folder` to specify the output directory, never rescans or logs original input filenames.**
+- **`input_dir` is only required for new runs; resuming is always based on the output folder.**
+- **All job and file discovery for resume is based on anonymized, already-processed files in the output folder.**
+- **Status and resume commands (`--show-resume-status`, `--stage-status`) now operate on the output folder, never on the original input.**
+- **The pipeline no longer leaks PII in logs or console output during resume or status checks.**
 
 ## Recent Changes
 
@@ -38,6 +44,13 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Integrated robust error handling and defensive filtering
 - Finalized privacy-first manifest/logging and traceability patterns
 - Added LLM and CLAP integration, master transcript, and extensible workflow config
+- **Added `--output-folder` argument to CLI.**
+- **Made `input_dir` optional for resume.**
+- **Refactored main script logic to distinguish between fresh and resume runs.**
+- **Updated help text and argument parser.**
+- **Patched all resume/status/clear/force commands to operate on the output folder.**
+- **Ensured that when resuming, jobs are reconstructed from the anonymized `renamed/` directory, not from the original input.**
+- **Console output for available folders now only shows anonymized run folder names.**
 
 ## Next Steps
 
@@ -48,6 +61,8 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Complete and test finalization stage for MP3 outputs and metadata
 - Ensure robust fallback logic for LLM output
 - Update documentation and memory bank as the project evolves
+- **Continue to monitor for any edge cases where PII could leak (e.g., error messages, stack traces).**
+- **Consider adding automated tests to verify no PII is ever output during resume/status operations.**
 
 ## Active Decisions & Considerations
 
