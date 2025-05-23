@@ -23,6 +23,10 @@ def wav_to_mp3_youtube_style(wav_path, mp3_path, bitrate='192k'):
     - True peak limiting to -1.0 dBTP
     - High-frequency clarity enhancement
     """
+    import logging
+    if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+        print(f"[ERROR] Input WAV file missing or empty: {wav_path}")
+        return
     cmd = [
         'ffmpeg', '-y', '-i', str(wav_path),
         # Audio processing chain (YouTube-style)
@@ -39,10 +43,17 @@ def wav_to_mp3_youtube_style(wav_path, mp3_path, bitrate='192k'):
         '-codec:a', 'libmp3lame', '-qscale:a', '2', '-b:a', bitrate,
         str(mp3_path)
     ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        print(f"[WARN] YouTube-style processing failed for {wav_path}, falling back to simple conversion")
-        # Fallback to simple conversion
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        if result.returncode != 0:
+            print(f"[WARN] YouTube-style processing failed for {wav_path}, falling back to simple conversion")
+            print(f"[FFMPEG STDERR] {result.stderr.decode(errors='ignore')}")
+            wav_to_mp3_simple(wav_path, mp3_path, bitrate)
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] ffmpeg timed out for {wav_path}, falling back to simple conversion")
+        wav_to_mp3_simple(wav_path, mp3_path, bitrate)
+    except Exception as e:
+        print(f"[ERROR] Exception during ffmpeg for {wav_path}: {e}")
         wav_to_mp3_simple(wav_path, mp3_path, bitrate)
 
 def wav_to_mp3_simple(wav_path, mp3_path, bitrate='192k'):

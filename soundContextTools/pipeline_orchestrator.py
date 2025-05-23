@@ -651,6 +651,9 @@ class PipelineOrchestrator:
             # Filter segs to only those with 'channel' and 'start', log malformed
             valid_segs = []
             for s in segs:
+                # Only include segments for this call_id (exclude [0000-CONVERSATION] etc.)
+                if s.get('call_id') != call_id:
+                    continue
                 if 'channel' in s and 'start' in s:
                     valid_segs.append(s)
                 else:
@@ -865,6 +868,17 @@ class PipelineOrchestrator:
     def run_llm_stage(self, llm_config_path=None):
         import json
         from pathlib import Path
+        # --- Read pipeline mode from pipeline_state.json if available ---
+        mode = 'call'  # default
+        pipeline_state_path = self.run_folder / 'pipeline_state.json'
+        if pipeline_state_path.exists():
+            try:
+                with open(pipeline_state_path, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                if 'mode' in state:
+                    mode = state['mode']
+            except Exception as e:
+                self.log_event('WARNING', 'pipeline_state_read_failed', {'error': str(e)})
         if llm_config_path is None:
             llm_config_path = Path('workflows/llm_tasks.json')
         else:
@@ -879,7 +893,7 @@ class PipelineOrchestrator:
         llm_dir = self.run_folder / 'llm'
         llm_dir.mkdir(exist_ok=True, parents=True)
         call_ids = [d.name for d in soundbites_dir.iterdir() if d.is_dir()]
-        self.log_event('INFO', 'llm_stage_start', {'llm_dir': str(llm_dir)})
+        self.log_event('INFO', 'llm_stage_start', {'llm_dir': str(llm_dir), 'mode': mode})
         max_tokens = 16384
         safe_chunk = 10000  # chunk size for LLM input
         for call_id in call_ids:
@@ -888,89 +902,220 @@ class PipelineOrchestrator:
             if master_transcript.exists():
                 with open(master_transcript, 'r', encoding='utf-8') as f:
                     transcript_text = f.read()
-            per_speaker = self.get_per_speaker_transcripts(call_id)
             call_llm_dir = llm_dir / call_id
             call_llm_dir.mkdir(parents=True, exist_ok=True)
-            speaker_outputs = {}
-            for speaker_id, speaker_text in per_speaker.items():
-                speaker_outputs[speaker_id] = {}
-                token_count = estimate_tokens(speaker_text)
-                if token_count > safe_chunk:
-                    # Chunk the transcript
-                    words = speaker_text.split()
-                    chunk_size = safe_chunk * 4  # fallback: 1 token ≈ 4 chars
-                    chunks = []
-                    current = []
-                    current_len = 0
-                    for word in words:
-                        current.append(word)
-                        current_len += len(word) + 1
-                        if current_len >= chunk_size:
+            if mode == 'call':
+                # Only run LLM tasks on the master transcript for each call
+                for task in llm_tasks:
+                    name = task.get('name', 'unnamed_task')
+                    prompt_template = task.get('prompt_template', '')
+                    output_file = f'{name}.txt'
+                    output_path = call_llm_dir / output_file
+                    prompt = prompt_template.format(transcript=transcript_text)
+                    # LLM API call (same as run_llm_task_for_call)
+                    import requests, random, hashlib
+                    base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+                    api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+                    model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+                    temperature = llm_config.get('lm_studio_temperature', 0.5)
+                    max_tokens = llm_config.get('lm_studio_max_tokens', 250)
+                    headers = {
+                        'Authorization': f'Bearer {api_key}',
+                        'Content-Type': 'application/json'
+                    }
+                    seed_input = f"{call_id}_{name}"
+                    seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+                    data = {
+                        "model": model_id,
+                        "messages": [
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "seed": seed
+                    }
+                    try:
+                        response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+                        if response.status_code == 200:
+                            result = response.json()
+                            content = result['choices'][0]['message']['content'].strip()
+                            with open(output_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                        else:
+                            error_msg = f"LLM API error {response.status_code}: {response.text}"
+                            with open(output_path, 'w', encoding='utf-8') as f:
+                                f.write(error_msg)
+                            self.log_event('ERROR', 'llm_api_error', {'call_id': call_id, 'task': name, 'status': response.status_code, 'text': response.text, 'seed': seed})
+                    except Exception as e:
+                        with open(output_path, 'w', encoding='utf-8') as f:
+                            f.write(f"LLM request failed: {e}")
+                        self.log_event('ERROR', 'llm_request_failed', {'call_id': call_id, 'task': name, 'error': str(e), 'seed': seed})
+                    self.log_and_manifest(
+                        stage='llm',
+                        call_id=call_id,
+                        input_files=[str(master_transcript)],
+                        output_files=[str(output_path)],
+                        params={'task': name, 'prompt_template': prompt_template},
+                        metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
+                        event='llm_task',
+                        result='success'
+                    )
+                # Warn if per-speaker LLM tasks are configured in call mode
+                per_speaker = self.get_per_speaker_transcripts(call_id)
+                if per_speaker:
+                    self.log_event('WARNING', 'per_speaker_llm_skipped', {'call_id': call_id, 'mode': mode, 'message': 'Per-speaker LLM tasks are skipped in call mode.'})
+            else:
+                # Single-file mode: run per-speaker LLM tasks as before
+                per_speaker = self.get_per_speaker_transcripts(call_id)
+                speaker_outputs = {}
+                for speaker_id, speaker_text in per_speaker.items():
+                    speaker_outputs[speaker_id] = {}
+                    token_count = estimate_tokens(speaker_text)
+                    if token_count > safe_chunk:
+                        # Chunking logic (as before)
+                        words = speaker_text.split()
+                        chunk_size = safe_chunk * 4
+                        chunks = []
+                        current = []
+                        current_len = 0
+                        for word in words:
+                            current.append(word)
+                            current_len += len(word) + 1
+                            if current_len >= chunk_size:
+                                chunks.append(' '.join(current))
+                                current = []
+                                current_len = 0
+                        if current:
                             chunks.append(' '.join(current))
-                            current = []
-                            current_len = 0
-                    if current:
-                        chunks.append(' '.join(current))
-                    for i, chunk in enumerate(chunks):
                         for task in llm_tasks:
                             name = task.get('name', 'unnamed_task')
                             prompt_template = task.get('prompt_template', '')
-                            output_file = f'{speaker_id}_chunk_{i+1:02d}_{name}.txt'
-                            prompt = f"[Part {i+1} of {len(chunks)} for Speaker {speaker_id}]\n" + prompt_template.format(transcript=chunk)
+                            output_file = f'{speaker_id}_{name}.txt'
                             output_path = call_llm_dir / output_file
-                            # For now, just write the prompt for demonstration
+                            responses = []
+                            for i, chunk in enumerate(chunks):
+                                prompt = f"[Part {i+1} of {len(chunks)} for Speaker {speaker_id}]\n" + prompt_template.format(transcript=chunk)
+                                import requests, random, hashlib
+                                base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+                                api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+                                model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+                                temperature = llm_config.get('lm_studio_temperature', 0.5)
+                                max_tokens = llm_config.get('lm_studio_max_tokens', 250)
+                                headers = {
+                                    'Authorization': f'Bearer {api_key}',
+                                    'Content-Type': 'application/json'
+                                }
+                                seed_input = f"{call_id}_{speaker_id}_{name}_{i}"
+                                seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+                                data = {
+                                    "model": model_id,
+                                    "messages": [
+                                        {"role": "user", "content": prompt}
+                                    ],
+                                    "temperature": temperature,
+                                    "max_tokens": max_tokens,
+                                    "seed": seed
+                                }
+                                try:
+                                    response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+                                    if response.status_code == 200:
+                                        result = response.json()
+                                        content = result['choices'][0]['message']['content'].strip()
+                                        responses.append(content)
+                                    else:
+                                        error_msg = f"LLM API error {response.status_code}: {response.text}"
+                                        responses.append(error_msg)
+                                        self.log_event('ERROR', 'llm_api_error', {'call_id': call_id, 'speaker_id': speaker_id, 'task': name, 'status': response.status_code, 'text': response.text, 'seed': seed})
+                                except Exception as e:
+                                    responses.append(f"LLM request failed: {e}")
+                                    self.log_event('ERROR', 'llm_request_failed', {'call_id': call_id, 'speaker_id': speaker_id, 'task': name, 'error': str(e), 'seed': seed})
+                            final_response = '\n\n'.join(responses)
                             with open(output_path, 'w', encoding='utf-8') as f:
-                                f.write(prompt)
-                            speaker_outputs[speaker_id][f'{name}_chunk_{i+1:02d}'] = str(output_path)
+                                f.write(final_response)
+                            speaker_outputs[speaker_id][name] = str(output_path)
                             self.log_and_manifest(
                                 stage='llm',
                                 call_id=call_id,
                                 input_files=[f'per-speaker:{speaker_id}'],
                                 output_files=[str(output_path)],
-                                params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id, 'chunk': i+1},
+                                params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id, 'chunks': len(chunks)},
                                 metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
                                 event='llm_task',
                                 result='success'
                             )
-                else:
-                    for task in llm_tasks:
-                        name = task.get('name', 'unnamed_task')
-                        prompt_template = task.get('prompt_template', '')
-                        output_file = f'{speaker_id}_{name}.txt'
-                        prompt = prompt_template.format(transcript=speaker_text)
-                        output_path = call_llm_dir / output_file
-                        # For now, just write the prompt for demonstration
-                        with open(output_path, 'w', encoding='utf-8') as f:
-                            f.write(prompt)
-                        speaker_outputs[speaker_id][name] = str(output_path)
-                        self.log_and_manifest(
-                            stage='llm',
-                            call_id=call_id,
-                            input_files=[f'per-speaker:{speaker_id}'],
-                            output_files=[str(output_path)],
-                            params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id},
-                            metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
-                            event='llm_task',
-                            result='success'
-                        )
-            # Aggregate per-speaker outputs into a summary file
-            agg_path = call_llm_dir / 'per_speaker_llm_outputs.json'
-            with open(agg_path, 'w', encoding='utf-8') as f:
-                json.dump(speaker_outputs, f, indent=2)
-            self.log_and_manifest(
-                stage='llm',
-                call_id=call_id,
-                input_files=None,
-                output_files=[str(agg_path)],
-                params={'aggregation': 'per-speaker'},
-                metadata={'speaker_outputs': speaker_outputs},
-                event='llm_aggregation',
-                result='success'
-            )
+                    else:
+                        for task in llm_tasks:
+                            name = task.get('name', 'unnamed_task')
+                            prompt_template = task.get('prompt_template', '')
+                            output_file = f'{speaker_id}_{name}.txt'
+                            output_path = call_llm_dir / output_file
+                            prompt = prompt_template.format(transcript=speaker_text)
+                            import requests, random, hashlib
+                            base_url = llm_config.get('lm_studio_base_url', 'http://localhost:1234/v1')
+                            api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
+                            model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+                            temperature = llm_config.get('lm_studio_temperature', 0.5)
+                            max_tokens = llm_config.get('lm_studio_max_tokens', 250)
+                            headers = {
+                                'Authorization': f'Bearer {api_key}',
+                                'Content-Type': 'application/json'
+                            }
+                            seed_input = f"{call_id}_{speaker_id}_{name}"
+                            seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16) % (2**32)
+                            data = {
+                                "model": model_id,
+                                "messages": [
+                                    {"role": "user", "content": prompt}
+                                ],
+                                "temperature": temperature,
+                                "max_tokens": max_tokens,
+                                "seed": seed
+                            }
+                            try:
+                                response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
+                                if response.status_code == 200:
+                                    result = response.json()
+                                    content = result['choices'][0]['message']['content'].strip()
+                                    with open(output_path, 'w', encoding='utf-8') as f:
+                                        f.write(content)
+                                else:
+                                    error_msg = f"LLM API error {response.status_code}: {response.text}"
+                                    with open(output_path, 'w', encoding='utf-8') as f:
+                                        f.write(error_msg)
+                                    self.log_event('ERROR', 'llm_api_error', {'call_id': call_id, 'speaker_id': speaker_id, 'task': name, 'status': response.status_code, 'text': response.text, 'seed': seed})
+                            except Exception as e:
+                                with open(output_path, 'w', encoding='utf-8') as f:
+                                    f.write(f"LLM request failed: {e}")
+                                self.log_event('ERROR', 'llm_request_failed', {'call_id': call_id, 'speaker_id': speaker_id, 'task': name, 'error': str(e), 'seed': seed})
+                            speaker_outputs[speaker_id][name] = str(output_path)
+                            self.log_and_manifest(
+                                stage='llm',
+                                call_id=call_id,
+                                input_files=[f'per-speaker:{speaker_id}'],
+                                output_files=[str(output_path)],
+                                params={'task': name, 'prompt_template': prompt_template, 'speaker_id': speaker_id},
+                                metadata={'llm_model': llm_config.get('lm_studio_model_identifier')},
+                                event='llm_task',
+                                result='success'
+                            )
+                # Aggregate per-speaker outputs into a summary file
+                agg_path = call_llm_dir / 'per_speaker_llm_outputs.json'
+                with open(agg_path, 'w', encoding='utf-8') as f:
+                    json.dump(speaker_outputs, f, indent=2)
+                self.log_and_manifest(
+                    stage='llm',
+                    call_id=call_id,
+                    input_files=None,
+                    output_files=[str(agg_path)],
+                    params={'aggregation': 'per-speaker'},
+                    metadata={'speaker_outputs': speaker_outputs},
+                    event='llm_aggregation',
+                    result='success'
+                )
 
     def run_normalization_stage(self):
         """
-        Normalize separated vocal stems to -14.0 LUFS and output to normalized/<call_id>/<channel>.wav.
+        Normalize separated vocal stems to -14.0 LUFS and output to normalized/<call id>/<channel>.wav.
         Downstream stages use normalized vocals.
         Logs every file written and updates manifest.
         """
@@ -1771,6 +1916,8 @@ if __name__ == '__main__':
     parser.add_argument('--stage-status', type=str, metavar='STAGE', help='Show detailed status for a specific stage')
     parser.add_argument('--show-resume-status', action='store_true', help='Show current resume status and exit')
     parser.add_argument('--force', action='store_true', help='When used with --resume-from, deletes all outputs and state from that stage forward for a clean re-run')
+    # 1. Add CLI flag for out-file processing
+    parser.add_argument('--process-out-files', action='store_true', help='Enable processing of out- files as single-file inputs (lower fidelity, not recommended for main workflow)')
 
     # Print valid stage names in help
     from pipeline_state import get_pipeline_stages
@@ -1780,7 +1927,8 @@ if __name__ == '__main__':
         "\n\nExample: --resume-from diarization\n" +
         "\nUse --force with --resume-from to delete all outputs and state from that stage forward.\n" +
         "\nUse --llm-seed to set a global seed for LLM tasks (default: random per task).\n" +
-        "\nUse --call-cutter to enable CLAP-based call segmentation for long files.\n"
+        "\nUse --call-cutter to enable CLAP-based call segmentation for long files.\n" +
+        "\n\nNote: By default, out- files are only used for CLAP segmentation/annotation. Use --process-out-files to process them as single-file inputs (not recommended for main workflow)."
     )
 
     args = parser.parse_args()
