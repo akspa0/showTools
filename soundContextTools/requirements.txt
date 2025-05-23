@@ -1,4 +1,6 @@
 # Core dependencies
+# For PyTorch, see conda instructions below for best compatibility
+# If using pip, install the correct torch/torchaudio version for your system from https://pytorch.org/get-started/locally/
 torch>=2.0.0
 # For GPU, install torch/torchaudio with CUDA support from https://pytorch.org/get-started/locally/
 torchaudio>=2.0.0
@@ -11,6 +13,7 @@ pydub
 scipy
 colorama
 pyyaml
+requests
 
 # Hugging Face ecosystem
 transformers>=4.30.0
@@ -26,8 +29,31 @@ nemo_toolkit[asr]>=1.22.0
 # Whisper ASR
 openai-whisper
 
+# Audio separation
+# (audio-separator is a third-party tool, install as needed)
+
+# For YouTube/URL audio ingestion
+yt_dlp
+
 # If you use Jupyter or notebooks
 ipython
 
 # Optional: for logging, YAML config, etc.
 # pyyaml, colorama already included 
+
+# ---
+# Conda installation instructions (recommended for PyTorch):
+#
+# 1. Create a new environment:
+#    conda create -n soundcontext python=3.10
+#    conda activate soundcontext
+#
+# 2. Install PyTorch (choose the right CUDA version for your system):
+#    See https://pytorch.org/get-started/locally/ for the latest command.
+#    Example (CPU only):
+#      conda install pytorch torchaudio cpuonly -c pytorch
+#    Example (CUDA 11.8):
+#      conda install pytorch torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+#
+# 3. Install the rest of the dependencies:
+#    pip install -r requirements.txt 

@@ -231,21 +231,36 @@ class PipelineOrchestrator:
             } for job in separation_jobs], f, indent=2)
         self.log_event('INFO', 'audio_separation_complete', {'manifest_path': str(manifest_path)})
 
-    def run_clap_annotation_stage(self):
+    def run_clap_annotation_stage(self, annotation_config_path=None):
         """
-        Run CLAP annotation for all 'out' files in renamed/.
+        Run CLAP annotation for all 'out' files in renamed/ using config from workflows/clap_annotation.json.
         Updates manifest and logs via orchestrator methods.
-        Uses the fused CLAP model for annotation.
-        Logs every file written and updates manifest.
         """
         renamed_dir = self.run_folder / 'renamed'
         clap_dir = self.run_folder / 'clap'
-        prompts = [
-            'dog barking', 'DTMF', 'ringing', 'yelling', 'music', 'laughter', 'crying', 'doorbell', 'car horn', 'applause', 'gunshot', 'siren', 'footsteps', 'phone hangup', 'phone pickup', 'busy signal', 'static', 'noise', 'silence'
-        ]
-        self.log_event('INFO', 'clap_annotation_start', {'prompts': prompts})
+        import json
+        config_path = annotation_config_path or Path('workflows/clap_annotation.json')
+        with open(config_path, 'r', encoding='utf-8') as f:
+            annotation_config = json.load(f)
+        prompts = annotation_config.get('prompts', [])
+        confidence_threshold = annotation_config.get('confidence_threshold', 0.6)
+        chunk_length_sec = annotation_config.get('chunk_length_sec', 5)
+        overlap_sec = annotation_config.get('overlap_sec', 2)
+        self.log_event('INFO', 'clap_annotation_start', {
+            'prompts': prompts,
+            'confidence_threshold': confidence_threshold,
+            'chunk_length_sec': chunk_length_sec,
+            'overlap_sec': overlap_sec,
+            'config_path': str(config_path)
+        })
         fused_clap_model = 'laion/clap-htsat-fused'
-        results = annotate_clap_for_out_files(renamed_dir, clap_dir, prompts, model=fused_clap_model)
+        results = annotate_clap_for_out_files(
+            renamed_dir, clap_dir, prompts,
+            model=fused_clap_model,
+            chunk_length_sec=chunk_length_sec,
+            overlap_sec=overlap_sec,
+            confidence_threshold=confidence_threshold
+        )
         for result in results:
             self.log_and_manifest(
                 stage='clap',

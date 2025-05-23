@@ -1,0 +1,11 @@
+{
+  "prompts": [
+    "dog barking", "DTMF", "ringing", "yelling", "music", "laughter",
+    "crying", "doorbell", "car horn", "applause", "gunshot", "siren",
+    "footsteps", "phone hangup", "phone pickup", "busy signal", "static",
+    "noise", "silence", "telephone ring tones", "hang-up tones"
+  ],
+  "confidence_threshold": 0.6,
+  "chunk_length_sec": 5,
+  "overlap_sec": 2
+} 

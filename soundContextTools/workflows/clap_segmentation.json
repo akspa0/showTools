@@ -1,0 +1,19 @@
+{
+  "clap_segmentation": {
+    "prompts": [
+      "telephone ring tones",
+      "hang-up tones",
+      "dial tone",
+      "call start",
+      "call end"
+    ],
+    "confidence_threshold": 0.6,
+    "min_segment_length_sec": 10,
+    "segment_padding_sec": 0.5,
+    "min_gap_sec": 2.0,
+    "min_call_duration_sec": 10.0,
+    "start_prompt": "telephone ring tones",
+    "end_prompt": "hang-up tones",
+    "noise_gap_sec": 1.5
+  }
+} 
