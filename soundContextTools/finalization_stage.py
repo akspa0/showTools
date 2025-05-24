@@ -109,6 +109,21 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     llm_dir = run_folder / 'llm'
     # --- 1. Calls ---
     call_entries = [e for e in manifest if e.get('stage') == 'remix']
+    # Fallback: if no remix entries, scan call/ for remixed_call.wav files
+    if not call_entries:
+        call_dir = run_folder / 'call'
+        print("[WARN] No remix entries found in manifest; scanning call/ directory for remixed calls.")
+        for call_folder in call_dir.iterdir():
+            if not call_folder.is_dir():
+                continue
+            remixed_wav = call_folder / 'remixed_call.wav'
+            if remixed_wav.exists():
+                call_id = call_folder.name
+                call_entries.append({
+                    'call_id': call_id,
+                    'output_files': [str(remixed_wav)],
+                    'original_title_for_id3': call_id
+                })
     for entry in call_entries:
         call_id = entry.get('call_id')
         wav_path = Path(entry.get('output_files')[0]) if entry.get('output_files') else None
@@ -119,7 +134,6 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                 lines = [line.strip().strip('"') for line in f.read().splitlines() if line.strip()]
                 if lines:
                     call_title = lines[0]
-                    # Remove commentary starting with 'This title' (case-insensitive)
                     call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
         sanitized_title = sanitize_filename(call_title)
         mp3_name = sanitized_title + '.mp3'
@@ -137,7 +151,24 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             embed_lineage_id3(mp3_path, original_title, start_time, end_time)
             # --- Copy master transcript to finalized/calls as <sanitized_title>_transcript.txt ---
             soundbites_root = run_folder / 'soundbites'
-            transcript_src = soundbites_root / sanitized_title / 'master_transcript.txt'
+            call_id_to_folder = {}
+            for folder in soundbites_root.iterdir():
+                if not folder.is_dir():
+                    continue
+                if folder.name[:4].isdigit():
+                    cid = folder.name[:4]
+                    call_id_to_folder[cid] = folder.name
+                else:
+                    for file in folder.glob('*_master_transcript.txt'):
+                        parts = file.name.split('_')
+                        if parts and parts[0][:4].isdigit():
+                            cid = parts[0][:4]
+                            call_id_to_folder[cid] = folder.name
+            transcript_src = None
+            if call_id in call_id_to_folder:
+                transcript_src = soundbites_root / call_id_to_folder[call_id] / 'master_transcript.txt'
+            else:
+                transcript_src = soundbites_root / sanitized_title / 'master_transcript.txt'
             transcript_dst = calls_dir / f'{sanitized_title}_transcript.txt'
             if transcript_src.exists():
                 shutil.copy2(transcript_src, transcript_dst)

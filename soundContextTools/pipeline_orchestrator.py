@@ -1429,19 +1429,16 @@ class PipelineOrchestrator:
         """
         run_finalization_stage(self.run_folder, self.manifest)
 
-    def run(self, mode='auto', call_cutter=False):
+    def run(self, mode='auto', call_cutter=False, call_tones=False):
         print(f"[INFO] Running pipeline in {mode} mode.")
         if mode == 'single-file':
-            # Run single-file workflow (CLAP segmentation, annotation, etc.)
-            self.run_single_file_workflow()
+            self.run_single_file_workflow(call_tones=call_tones)
         elif mode == 'calls':
-            # Run call-processing workflow
-            self.run_call_processing_workflow()
+            self.run_call_processing_workflow(call_tones=call_tones)
         else:
-            # Fallback/auto
-            self.run_call_processing_workflow()
+            self.run_call_processing_workflow(call_tones=call_tones)
 
-    def run_single_file_workflow(self):
+    def run_single_file_workflow(self, call_tones=False):
         # Full pipeline for single-file mode
         self._run_ingestion_jobs()
         # Find the original input audio file (should be in renamed/)
@@ -1531,11 +1528,11 @@ class PipelineOrchestrator:
             self.run_rename_soundbites_stage()
             self.run_final_soundbite_stage()
             self.run_llm_stage(llm_config_path=self.llm_config_path)
-            self.run_remix_stage()
-            self.run_show_stage()
+            self.run_remix_stage(call_tones=call_tones)
+            self.run_show_stage(call_tones=call_tones)
             self.run_finalization_stage()
 
-    def run_call_processing_workflow(self):
+    def run_call_processing_workflow(self, call_tones=False):
         # Full pipeline for call-processing mode
         self._run_ingestion_jobs()
         self.add_separation_jobs()
@@ -1550,8 +1547,8 @@ class PipelineOrchestrator:
         self.run_rename_soundbites_stage()
         self.run_final_soundbite_stage()
         self.run_llm_stage(llm_config_path=self.llm_config_path)
-        self.run_remix_stage()
-        self.run_show_stage()
+        self.run_remix_stage(call_tones=call_tones)
+        self.run_show_stage(call_tones=call_tones)
         self.run_finalization_stage()
 
     def run_with_resume(self, call_tones=False, resume=True, resume_from=None):
@@ -1607,7 +1604,7 @@ class PipelineOrchestrator:
         self.log_event('INFO', 'ingestion_start', {
             'total_jobs': total_jobs,
             'rename_jobs': len(rename_jobs),
-            'job_details': [{'job_id': j.job_id, 'job_type': j.job_type, 'orig_path': j.data.get('orig_path')} for j in self.jobs[:5]]  # First 5 jobs
+            'job_details': [{'job_id': j.job_id, 'job_type': j.job_type} for j in self.jobs[:5]]  # First 5 jobs, anonymized
         })
         
         if total_jobs == 0:
@@ -2157,5 +2154,5 @@ if __name__ == '__main__':
     if resume_mode:
         orchestrator.run_with_resume(call_tones=args.call_tones, resume=True, resume_from=resume_from_stage)
     else:
-        orchestrator.run(mode=args.mode, call_cutter=args.call_cutter)
+        orchestrator.run(mode=args.mode, call_cutter=args.call_cutter, call_tones=args.call_tones)
     # No redundant transcription after renaming
