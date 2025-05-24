@@ -648,16 +648,35 @@ class PipelineOrchestrator:
                                 'confidence': event.get('confidence'),
                                 'channel': channel
                             })
-            # Filter segs to only those with 'channel' and 'start', log malformed
+            # Determine what channels are present
+            present_channels = set(s.get('channel', '') for s in segs)
+            has_tuple = any(c in ['left-vocals', 'right-vocals'] for c in present_channels)
+            has_conversation = any('conversation' in c for c in present_channels)
+            # Filter segs: if tuple channels exist, only process those; else, process conversation channels
             valid_segs = []
             for s in segs:
-                # Only include segments for this call_id (exclude [0000-CONVERSATION] etc.)
                 if s.get('call_id') != call_id:
                     continue
-                if 'channel' in s and 'start' in s:
+                channel = s.get('channel', '')
+                if has_tuple:
+                    if channel not in ['left-vocals', 'right-vocals']:
+                        self.log_event('WARNING', 'skipped_non_tuple_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
+                        continue
+                else:
+                    # Accept conversation/mono channels
+                    if 'conversation' not in channel:
+                        self.log_event('WARNING', 'skipped_non_conversation_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
+                        continue
+                if 'start' in s:
                     valid_segs.append(s)
                 else:
                     self.log_event('WARNING', 'malformed_segment_entry', {'entry': s})
+            if has_tuple:
+                self.log_event('INFO', 'processing_call_as_tuple', {'call_id': call_id, 'channels': list(present_channels)})
+            elif has_conversation:
+                self.log_event('INFO', 'processing_call_as_single_file', {'call_id': call_id, 'channels': list(present_channels)})
+            else:
+                self.log_event('WARNING', 'no_valid_segments_for_call', {'call_id': call_id, 'channels': list(present_channels)})
             for seg in sorted(valid_segs, key=lambda s: (s['channel'], s['start'])):
                 channel = seg['channel']
                 speaker = seg['speaker']
@@ -671,7 +690,10 @@ class PipelineOrchestrator:
                 transcript = transcript_entry['text'] if transcript_entry and transcript_entry.get('text') else None
                 if not transcript or not transcript.strip():
                     continue
-                channel_fmt = f"[{channel.replace('-vocals','').upper()}]"
+                if channel in ['left-vocals', 'right-vocals']:
+                    channel_fmt = f"[{channel.replace('-vocals','').upper()}]"
+                else:
+                    channel_fmt = "[CONVERSATION]"
                 spk_num = ''.join(filter(str.isdigit, speaker))
                 spk_fmt = f"[Speaker{int(spk_num):02d}]" if spk_num else f"[{speaker}]"
                 spk_dir = speakers_dir / call_id / channel / speaker
@@ -738,6 +760,9 @@ class PipelineOrchestrator:
             ]
             all_events_sorted = sorted(all_events, key=lambda x: x['start'])
             master_txt = soundbites_dir / call_id / f"{call_id}_master_transcript.txt"
+            if not call_soundbites:
+                self.log_event('WARNING', 'no_valid_soundbites_for_call', {'call_id': call_id})
+                continue
             with open(master_txt, 'w', encoding='utf-8') as f:
                 for ev in all_events_sorted:
                     f.write(f"{ev['text']}\n")
@@ -764,38 +789,6 @@ class PipelineOrchestrator:
                 event='file_written',
                 result='success'
             )
-            for channel, segs in channel_segments.items():
-                seg_dir = soundbites_dir / call_id / channel
-                seg_dir.mkdir(parents=True, exist_ok=True)
-                seg_txt = seg_dir / f"{channel}_segments.txt"
-                seg_json = seg_dir / f"{channel}_segments.json"
-                with open(seg_txt, 'w', encoding='utf-8') as f:
-                    for s in segs:
-                        spk_num = ''.join(filter(str.isdigit, s['speaker']))
-                        spk_fmt = f"[Speaker{int(spk_num):02d}]" if spk_num else f"[{s['speaker']}]"
-                        f.write(f"{spk_fmt}[{s['start']:.2f}-{s['end']:.2f}] {s['transcript']}\n")
-                self.log_and_manifest(
-                    stage='segment_log',
-                    call_id=call_id,
-                    input_files=None,
-                    output_files=[str(seg_txt)],
-                    params={'channel': channel},
-                    metadata=None,
-                    event='file_written',
-                    result='success'
-                )
-                with open(seg_json, 'w', encoding='utf-8') as f:
-                    json.dump(segs, f, indent=2, ensure_ascii=False)
-                self.log_and_manifest(
-                    stage='segment_log',
-                    call_id=call_id,
-                    input_files=None,
-                    output_files=[str(seg_json)],
-                    params={'channel': channel},
-                    metadata=None,
-                    event='file_written',
-                    result='success'
-                )
         self.log_event('INFO', 'final_soundbites_complete', {'calls': list(calls.keys())})
 
     def get_master_transcript_path(self, call_id):

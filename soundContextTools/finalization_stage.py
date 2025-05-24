@@ -121,7 +121,8 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     call_title = lines[0]
                     # Remove commentary starting with 'This title' (case-insensitive)
                     call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
-        mp3_name = sanitize_filename(call_title) + '.mp3'
+        sanitized_title = sanitize_filename(call_title)
+        mp3_name = sanitized_title + '.mp3'
         mp3_path = calls_dir / mp3_name
         if wav_path and wav_path.exists():
             wav_to_mp3(wav_path, mp3_path)
@@ -130,17 +131,18 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                 'tracknumber': call_id,
                 'album': 'Audio Context Calls',
             })
-            # Retrieve original_title_for_id3 from manifest/job data
-            original_title = None
-            if 'entry' in locals() and entry is not None:
-                original_title = entry.get('original_title_for_id3', call_title)
-            else:
-                # Fallback: use call_title or a default value
-                original_title = call_title or 'unknown_source'
-            # Retrieve start/end time for the soundbite (if available)
+            original_title = entry.get('original_title_for_id3', call_title)
             start_time = entry.get('start_time')
             end_time = entry.get('end_time')
             embed_lineage_id3(mp3_path, original_title, start_time, end_time)
+            # --- Copy master transcript to finalized/calls as <sanitized_title>_transcript.txt ---
+            soundbites_root = run_folder / 'soundbites'
+            transcript_src = soundbites_root / sanitized_title / 'master_transcript.txt'
+            transcript_dst = calls_dir / f'{sanitized_title}_transcript.txt'
+            if transcript_src.exists():
+                shutil.copy2(transcript_src, transcript_dst)
+            else:
+                print(f"[WARN] Master transcript not found for call {sanitized_title}: {transcript_src}")
     # --- 2. Show ---
     show_wav = run_folder / 'show' / 'show.wav'
     show_json = run_folder / 'show' / 'show.json'
@@ -164,17 +166,10 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             'album': 'Audio Context Show',
             'comment': show_desc,
         })
-        # Retrieve original_title_for_id3 from manifest/job data
-        original_title = None
-        if 'entry' in locals() and entry is not None:
-            original_title = entry.get('original_title_for_id3', show_title)
-        else:
-            # Fallback: use show_title or a default value
-            original_title = show_title or 'unknown_source'
-        # Retrieve start/end time for the soundbite (if available)
-        start_time = entry.get('start_time')
-        end_time = entry.get('end_time')
-        embed_lineage_id3(show_mp3, original_title, start_time, end_time)
+        # Only use show-level metadata for the show MP3; do not use 'entry' from previous loop
+        original_title = show_title or 'unknown_source'
+        # Defensive: do not use start_time/end_time from 'entry' (not defined here)
+        embed_lineage_id3(show_mp3, original_title)
     # --- 3. Show TXT ---
     def format_hms(seconds):
         return str(datetime.timedelta(seconds=int(seconds)))
@@ -428,11 +423,38 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     append_llm_show_notes(sfw_call_titles, complete_sfw_txt)
     # --- 4. Soundbites ---
     soundbites_root = run_folder / 'soundbites'
+    finalized_soundbites_root = finalized_dir / 'soundbites'
     clap_root = run_folder / 'clap'
-    for call_dir in list(soundbites_root.iterdir()):
-        if not call_dir.is_dir():
+    # --- Build mapping from call_id to sanitized soundbites folder name ---
+    call_id_to_folder = {}
+    for folder in soundbites_root.iterdir():
+        if not folder.is_dir():
             continue
-        call_id = call_dir.name
+        # Skip conversation/out- folders
+        if 'conversation' in folder.name or folder.name.startswith('out-'):
+            print(f"[WARN] Skipping conversation/out- folder in soundbites: {folder}")
+            continue
+        # Try to find call_id from manifest or folder contents
+        if folder.name[:4].isdigit():
+            call_id = folder.name[:4]
+            call_id_to_folder[call_id] = folder.name
+        else:
+            for file in folder.glob('*_master_transcript.txt'):
+                parts = file.name.split('_')
+                if parts and parts[0][:4].isdigit():
+                    call_id = parts[0][:4]
+                    call_id_to_folder[call_id] = folder.name
+    # For each valid call, copy to finalized/soundbites/<call_title>/
+    for call_id in sorted(call_id_to_folder.keys()):
+        folder_name = call_id_to_folder[call_id]
+        call_dir = soundbites_root / folder_name
+        if not call_dir.exists():
+            print(f"[WARN] Soundbites folder missing for call_id {call_id}: {call_dir}")
+            continue
+        # Defensive: skip if this is a conversation/out- folder
+        if 'conversation' in folder_name or folder_name.startswith('out-'):
+            print(f"[WARN] Skipping conversation/out- folder in finalization: {call_dir}")
+            continue
         # Determine sanitized call title
         call_title = call_id
         call_title_path = llm_dir / call_id / 'call_title.txt'
@@ -443,36 +465,55 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     call_title = lines[0]
                     call_title = re.split(r'(?i)\bthis title\b', call_title)[0].strip()
         sanitized_title = sanitize_filename(call_title)
-        new_call_dir = soundbites_root / sanitized_title
-        # If the new folder already exists, merge contents
-        if new_call_dir.exists():
-            # Move all files/subfolders from old to new
-            for item in call_dir.iterdir():
-                target = new_call_dir / item.name
-                if target.exists():
-                    continue  # skip if already exists
-                if item.is_dir():
-                    import shutil
-                    shutil.move(str(item), str(target))
-                else:
-                    import shutil
-                    shutil.move(str(item), str(target))
-            call_dir.rmdir()
+        finalized_call_dir = finalized_soundbites_root / sanitized_title
+        # Copy all files and subfolders from call_dir to finalized_call_dir
+        for root, dirs, files in os.walk(call_dir):
+            rel_root = Path(root).relative_to(call_dir)
+            target_root = finalized_call_dir / rel_root
+            target_root.mkdir(parents=True, exist_ok=True)
+            for file in files:
+                src_file = Path(root) / file
+                dst_file = target_root / file
+                try:
+                    shutil.copy2(src_file, dst_file)
+                    print(f"[INFO] Copied {src_file} -> {dst_file}")
+                except Exception as e:
+                    print(f"[WARN] Failed to copy {src_file} -> {dst_file}: {e}")
+        # Copy master transcript (.txt and .json) if present
+        master_txt = call_dir / 'master_transcript.txt'
+        master_json = call_dir / 'master_transcript.json'
+        if master_txt.exists():
+            try:
+                shutil.copy2(master_txt, finalized_call_dir / 'master_transcript.txt')
+                print(f"[INFO] Copied master transcript for {sanitized_title}")
+            except Exception as e:
+                print(f"[WARN] Failed to copy master transcript for {sanitized_title}: {e}")
         else:
-            call_dir.rename(new_call_dir)
-        # Copy master transcript into the new folder
-        master_txt = soundbites_root / sanitized_title / 'master_transcript.txt'
-        master_json = soundbites_root / sanitized_title / 'master_transcript.json'
-        orig_master_txt = soundbites_root / call_id / 'master_transcript.txt'
-        orig_master_json = soundbites_root / call_id / 'master_transcript.json'
-        if orig_master_txt.exists():
-            import shutil
-            shutil.copy2(orig_master_txt, master_txt)
-        if orig_master_json.exists():
-            import shutil
-            shutil.copy2(orig_master_json, master_json)
+            print(f"[WARN] Master transcript missing for {sanitized_title}: {master_txt}")
+        if master_json.exists():
+            try:
+                shutil.copy2(master_json, finalized_call_dir / 'master_transcript.json')
+            except Exception as e:
+                print(f"[WARN] Failed to copy master transcript JSON for {sanitized_title}: {e}")
+        # Copy per-speaker transcripts if present
+        for channel_dir in (call_dir.iterdir() if call_dir.exists() else []):
+            if not channel_dir.is_dir():
+                continue
+            for speaker_dir in channel_dir.iterdir():
+                if not speaker_dir.is_dir():
+                    continue
+                for txt_file in speaker_dir.glob('*.txt'):
+                    try:
+                        rel_path = txt_file.relative_to(call_dir)
+                        dst_file = finalized_call_dir / rel_path
+                        dst_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(txt_file, dst_file)
+                        print(f"[INFO] Copied per-speaker transcript {txt_file} -> {dst_file}")
+                    except Exception as e:
+                        print(f"[WARN] Failed to copy per-speaker transcript {txt_file}: {e}")
         # Gather CLAP events for this call (confidence >= 0.9)
         clap_events = []
+        master_transcript_events = []
         clap_call_dir = clap_root / call_dir.name
         if clap_call_dir.exists():
             for clap_file in clap_call_dir.glob('*.json'):
