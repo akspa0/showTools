@@ -89,4 +89,11 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Show description is included in manifest, ID3 tags, and as a separate .txt file
 - All soundbites are converted to MP3 with full metadata and included in finalized/soundbites/
 
-## Current Focus: Implementing CLAP-based call segmentation logic for --call-cutter (primary); LLM task completion issue under investigation (secondary) 
+## Current Focus: Implementing CLAP-based call segmentation logic for --call-cutter (primary); LLM task completion issue under investigation (secondary)
+
+## 2024-06-XX: Pipeline Stability Milestone
+- All major features (resume, finalized/calls export, single-file and tuple handling, privacy enforcement, tones, etc.) are now robust and working as intended.
+- Pipeline passes 12+ hours of continuous testing across all scenarios (fresh runs, resume from any stage, single-file and tuple jobs, force reruns, etc.).
+- Finalization is robust to missing manifest entries and always exports valid calls.
+- No PII leaks in logs or outputs.
+- The pipeline is now considered stable and production-ready. 

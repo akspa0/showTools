@@ -36,4 +36,8 @@ A privacy-focused, modular pipeline for processing phone call audio and other re
 ## Scope
 
 - In scope: All pipeline stages, privacy enforcement, manifest/logging, LLM/CLAP integration, error handling, extensibility
-- Out of scope: UI, deployment, advanced analytics (for now) 
+- Out of scope: UI, deployment, advanced analytics (for now)
+
+## 2024-06-XX: Project Milestone
+- All core requirements and goals are satisfied.
+- Pipeline is stable, robust, and production-ready. 

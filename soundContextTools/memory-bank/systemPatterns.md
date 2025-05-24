@@ -178,4 +178,10 @@ Documents system architecture, key technical decisions, design patterns, and com
 
 - Resume logic is now output-folder-centric, not input-centric.
 - All job creation and file discovery for resume is based on the anonymized `renamed/` directory.
-- Console output for available folders is sanitized and only shows anonymized run folder names. 
+- Console output for available folders is sanitized and only shows anonymized run folder names.
+
+## 2024-06-XX: Robustness Patterns
+- Finalization stage falls back to scanning call/ for remixed calls if manifest is missing remix entries, ensuring export always works.
+- All transcript and output pathing uses mapping logic (call_id_to_folder) to avoid folder naming mismatches.
+- CLI flags (e.g., --call-tones) are robustly propagated through all run and resume modes.
+- Strict privacy enforcement: no PII in logs or outputs at any stage. 
