@@ -1395,6 +1395,21 @@ class PipelineOrchestrator:
                     'end': tones_end
                 })
                 cur_time = tones_end
+        # Append tones after the last call if call_tones is set and tones.wav exists
+        if call_tones and tones_path.exists() and call_files:
+            tones, tones_sr = sf.read(str(tones_path))
+            if tones_sr != sr:
+                import librosa
+                tones = librosa.resample(tones.T, orig_sr=tones_sr, target_sr=sr).T
+            tones_start = cur_time
+            tones_end = tones_start + tones.shape[0] / sr
+            show_audio.append(tones)
+            show_timeline.append({
+                'tones': True,
+                'start': tones_start,
+                'end': tones_end
+            })
+            cur_time = tones_end
         if show_audio:
             show_audio = np.concatenate(show_audio, axis=0)
             sf.write(str(show_wav_path), show_audio, sr, subtype='PCM_16')
